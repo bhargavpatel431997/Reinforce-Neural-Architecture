@@ -1,4 +1,4 @@
-# Reinforce Neural Architecture
+# Reinforce Neural Architecture (For LLMs optimization)
 
 This project focuses on enabling AI to autonomously construct optimal neural architectures from scratch. By leveraging only the fundamental building blocks of mathematics, the AI is guided to discover and create entirely new neural network structures.
 
