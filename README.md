@@ -49,10 +49,6 @@ The goal is to allow the AI to explore beyond human-designed architectures—pot
 | **Algebraic Structures**   | Group Operation          | `a ⋆ b`                 | associative binary op with identity      | Group Inverse                  | `a⁻¹`                   | `a⋆a⁻¹=e`                                   |
 
 
-# Neural Architecture Search via Self-Play RL for MNIST Classification
-
-This document explains the workflow of using a Proximal Policy Optimization (PPO) agent with self-play to discover neural network architectures (represented as computational graphs) for classifying MNIST digits.
-
 ## Core Idea
 
 The system treats neural network architecture generation as a game played on a grid. Two players (controlled by the **same** PPO agent policy) take turns placing computational nodes (mathematical operations) onto the grid. The goal is to build a graph that, when evaluated on MNIST data, achieves low classification loss.
