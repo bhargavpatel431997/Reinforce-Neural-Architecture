@@ -34,7 +34,7 @@ class MathNode:
     def __init__(self, op_id: int, name: str, inputs=None, parameters=None, feature_dim=8, player_id=0): # Smaller default feature_dim
         self.op_id = op_id
         self.name = name
-        self.inputs = inputs or []
+        self.inputs = inputs or [] # List of input MathNode objects
         self.parameters = parameters or {}
         self.output = None
         self.position = None
@@ -48,9 +48,16 @@ class MathNode:
         }
         self.unique_id = id(self)
 
-    def add_input(self, node):
+    def add_input(self, node: 'MathNode'):
+        """Adds an input node if it's not already present."""
+        # Check by object identity or unique_id to prevent duplicates
         if node not in self.inputs:
             self.inputs.append(node)
+
+    def remove_input(self, node: 'MathNode'):
+        """Removes a specific input node."""
+        if node in self.inputs:
+            self.inputs.remove(node)
 
     def set_parameters(self, parameters):
         self.parameters = parameters
@@ -107,10 +114,14 @@ class ComputationalGraph:
         if node == self.output_node:
             self.output_node = None # Reset output if removed
 
-        # Remove connections pointing TO this node
-        for other_node in self.nodes:
-            if node in other_node.inputs:
-                other_node.inputs.remove(node)
+        # Remove connections pointing TO this node from other nodes' input lists
+        # This is crucial for undoing connections when a cycle is detected
+        nodes_to_check = list(self.nodes) # Iterate over a copy
+        for other_node in nodes_to_check:
+            other_node.remove_input(node) # Use the new remove_input method
+
+        # Clear the inputs list of the removed node itself (though it will be garbage collected)
+        node.inputs = []
 
         # Recalculate max_row/max_col (simple way)
         self.max_row = -1
@@ -124,18 +135,24 @@ class ComputationalGraph:
         """Get the node at a specific position, or None."""
         return self.grid.get((row, col))
 
+    def get_nodes_in_row(self, row: int) -> List[MathNode]:
+        """Get all nodes currently present in a specific row."""
+        return [node for (r, c), node in self.grid.items() if r == row]
+
     def get_node_by_id(self, unique_id: int) -> Optional[MathNode]:
         return self.nodes_by_id.get(unique_id)
 
     def connect_nodes(self, source_node_id: int, target_node_id: int) -> bool:
-        """Connect nodes by their unique IDs."""
+        """Connect nodes by their unique IDs. Avoids duplicates."""
         source = self.get_node_by_id(source_node_id)
         target = self.get_node_by_id(target_node_id)
 
         if source and target:
+            # Use the add_input method which handles duplicates
             target.add_input(source)
+            # print(f"Debug: Connected {source.name} ({source_id}) -> {target.name} ({target_id})") # Debug
             return True
-        print(f"Warning: Could not connect {source_node_id} to {target_node_id}. Source or target not found.")
+        # print(f"Warning: Could not connect {source_node_id} to {target_node_id}. Source or target not found.") # Reduce noise
         return False
 
     def set_output_node(self, node: MathNode):
@@ -158,23 +175,26 @@ class ComputationalGraph:
             visited.add(node_id)
             recursion_stack.add(node_id)
 
+            # Check dependencies (inputs)
             for neighbor in node.inputs:
                 neighbor_id = neighbor.unique_id
                 if neighbor_id not in visited:
                     if is_cyclic_util(neighbor_id):
+                        # print(f"Debug: Cycle detected via {node.name} <- {neighbor.name}") # Debug
                         return True
                 elif neighbor_id in recursion_stack:
+                    # print(f"Debug: Cycle detected: {node.name} depends on {neighbor.name} which is in recursion stack.") # Debug
                     return True # Cycle detected
 
             recursion_stack.remove(node_id)
             return False
 
         # Check cycles starting from all nodes
-        # Optimization: Only need to check from nodes with no outgoing edges (potential cycle ends)
-        # or nodes that were recently added/modified. For simplicity, checking all is safer.
         node_ids = list(self.nodes_by_id.keys())
         for node_id in node_ids:
             if node_id not in visited:
+                # Reset recursion stack for each new starting node check
+                # recursion_stack = set() # No, recursion stack should persist within a single DFS path
                 if is_cyclic_util(node_id):
                     return False
         return True
@@ -189,14 +209,16 @@ class ComputationalGraph:
             node = self.get_node_by_id(node_id)
             if not node: return # Node might have been removed
             if node_id in visiting:
-                raise RuntimeError("Cycle detected during topological sort") # Should be caught by is_valid_dag earlier
+                raise RuntimeError(f"Cycle detected during topological sort involving node {node.name} ({node_id})") # Should be caught by is_valid_dag earlier
             if node_id in visited: return
 
             visiting.add(node_id)
             visited.add(node_id)
 
-            # Visit dependencies first
-            for inp in node.inputs:
+            # Visit dependencies first (inputs)
+            # Sort inputs for deterministic order (optional but good practice)
+            sorted_input_nodes = sorted(node.inputs, key=lambda n: n.unique_id)
+            for inp in sorted_input_nodes:
                 visit(inp.unique_id)
 
             visiting.remove(node_id)
@@ -265,7 +287,9 @@ class ComputationalGraph:
                       # print(f"Warning: Node {node.name} has no inputs.") # Optional warning
                       inputs_ready = False # Cannot evaluate without inputs
             else:
-                 for inp_node in node.inputs:
+                 # Sort inputs by unique_id for deterministic order (optional but good practice)
+                 sorted_input_nodes = sorted(node.inputs, key=lambda n: n.unique_id)
+                 for inp_node in sorted_input_nodes:
                       if inp_node.output is None:
                            # This can happen if an input node failed to compute its output
                            print(f"Error: Input {inp_node.name} ({inp_node.unique_id}) for node {node.name} ({node.unique_id}) is None.")
@@ -359,6 +383,8 @@ class MathSelfPlayEnv(gym.Env):
     Gym environment for self-play graph construction for sequence-to-sequence tasks.
     Players take turns placing learnable math nodes on a grid.
     Reward is based on sequence loss (MSE) and expansion penalty.
+    Implements layered connection logic: nodes connect to all nodes in the row above,
+    and retroactively connect to nodes in the row below.
     """
     metadata = {'render_modes': ['human'], 'render_fps': 4}
 
@@ -659,6 +685,7 @@ class MathSelfPlayEnv(gym.Env):
         reward = 0.0
         info = {'error': '', 'termination_reason': None}
         new_node = None
+        retro_connections_made = [] # Keep track of (source_id, target_id) for potential reversal
 
         previous_pointer_location = self.pointer_location
         prev_max_row = self.graph.max_row
@@ -671,65 +698,51 @@ class MathSelfPlayEnv(gym.Env):
 
             if is_first_move:
                 # First move always places the input node at (0, 0)
-                # The action dict contains the *first operation* node's details
                 target_row, target_col = 0, 0
-                # Create the actual input node first
                 input_node = MathNode(
                     op_id=-1, name=f"Input_0_P{self.current_player}",
                     feature_dim=self.feature_dim, player_id=self.current_player
                 )
                 self.graph.add_node(input_node, target_row, target_col)
-                self.pointer_location = (target_row, target_col) # Pointer starts at input node
-                previous_pointer_location = self.pointer_location # Update for connection logic
+                self.pointer_location = (target_row, target_col)
+                previous_pointer_location = self.pointer_location
 
-                # Now determine position for the *first operation* node based on strategy
-                # Strategy 0 is invalid for the *first operation* node placement
-                if placement_strategy == 0:
-                     raise ValueError("Placement strategy 0 (relative to input) is invalid for the very first operation node.")
-                elif placement_strategy == 1: target_row, target_col = -1, 0 # Invalid (Up from 0,0)
-                elif placement_strategy == 2: target_row, target_col = 0, 1 # Right of input
-                elif placement_strategy == 3: target_row, target_col = 1, 0 # Down from input
-                elif placement_strategy == 4: target_row, target_col = 0, -1 # Invalid (Left from 0,0)
+                # Determine position for the *first operation* node
+                if placement_strategy == 0: raise ValueError("Placement strategy 0 invalid for first operation node.")
+                elif placement_strategy == 1: target_row, target_col = -1, 0 # Invalid
+                elif placement_strategy == 2: target_row, target_col = 0, 1 # Right
+                elif placement_strategy == 3: target_row, target_col = 1, 0 # Down
+                elif placement_strategy == 4: target_row, target_col = 0, -1 # Invalid
                 else: raise ValueError(f"Unknown placement strategy: {placement_strategy}")
 
-            else: # Not the first move (input node already exists)
-                if self.pointer_location is None:
-                     # This case should ideally not happen after the first move logic above
-                     raise RuntimeError("Pointer location is None after the first move.")
-                else:
-                     pointer_row, pointer_col = self.pointer_location
+            else: # Not the first move
+                if self.pointer_location is None: raise RuntimeError("Pointer location is None after first move.")
+                pointer_row, pointer_col = self.pointer_location
 
-                # Placement strategies (relative to pointer)
                 if placement_strategy == 1: target_row, target_col = pointer_row - 1, pointer_col # Up
                 elif placement_strategy == 2: target_row, target_col = pointer_row, pointer_col + 1 # Right
                 elif placement_strategy == 3: target_row, target_col = pointer_row + 1, pointer_col # Down
                 elif placement_strategy == 4: target_row, target_col = pointer_row, pointer_col - 1 # Left
-                elif placement_strategy == 0: # Strategy 0: Place relative to input node
+                elif placement_strategy == 0: # Strategy 0: Relative to input node
                      if self.graph.input_node and self.graph.input_node.position:
                           input_r, input_c = self.graph.input_node.position
-                          # Try placing below input node first
-                          target_row, target_col = input_r + 1, input_c
-                          # If below is occupied or off-grid, try right
+                          target_row, target_col = input_r + 1, input_c # Try below
                           if not (0 <= target_row < self.grid_size and 0 <= target_col < self.grid_size) or self.graph.get_node_at(target_row, target_col):
-                               target_row, target_col = input_r, input_c + 1
-                          # If right is also occupied or off-grid, consider it invalid for simplicity
+                               target_row, target_col = input_r, input_c + 1 # Try right
                           if not (0 <= target_row < self.grid_size and 0 <= target_col < self.grid_size) or self.graph.get_node_at(target_row, target_col):
-                               raise ValueError("Placement strategy 0 failed: Positions relative to input node are occupied or off-grid.")
-                     else:
-                          raise ValueError("Placement strategy 0 invalid: Input node position unknown.")
+                               raise ValueError("Placement strategy 0 failed: Positions relative to input node occupied/off-grid.")
+                     else: raise ValueError("Placement strategy 0 invalid: Input node position unknown.")
                 else: raise ValueError(f"Unknown placement strategy: {placement_strategy}")
 
             # --- 2. Validate Position ---
             if not (0 <= target_row < self.grid_size and 0 <= target_col < self.grid_size):
-                raise ValueError(f"Invalid move: Position ({target_row},{target_col}) is off-grid ({self.grid_size}x{self.grid_size}).")
-            occupied_node = self.graph.get_node_at(target_row, target_col)
-            if occupied_node is not None:
-                raise ValueError(f"Invalid move: Position ({target_row},{target_col}) is occupied by {occupied_node.name}.")
+                raise ValueError(f"Invalid move: Position ({target_row},{target_col}) is off-grid.")
+            if self.graph.get_node_at(target_row, target_col) is not None:
+                raise ValueError(f"Invalid move: Position ({target_row},{target_col}) is occupied.")
 
             # --- 3. Create and Add Operation Node ---
             if not (0 <= operation_id < self.num_operations):
-                 raise ValueError(f"Invalid operation_id: {operation_id} (should be 0-{self.num_operations-1})")
-
+                 raise ValueError(f"Invalid operation_id: {operation_id}")
             op_name = self.operations_impl[operation_id]['name']
             node_name = f"{op_name}_{len(self.graph.nodes)}_P{self.current_player}"
             new_node = MathNode(
@@ -737,101 +750,116 @@ class MathSelfPlayEnv(gym.Env):
                 feature_dim=self.feature_dim, player_id=self.current_player
             )
             self.graph.add_node(new_node, target_row, target_col)
+            # print(f"Debug: Added node {new_node.name} at ({target_row},{target_col})") # Debug
 
-            # --- 4. Connect Node ---
-            # Connect from the node at the previous pointer location.
-            # previous_pointer_location was set correctly even for the first move.
-            source_node = None
-            if previous_pointer_location:
-                 source_node = self.graph.get_node_at(*previous_pointer_location)
+            # --- 4. Connect Node (Layered Logic) ---
 
-            if source_node:
-                 self.graph.connect_nodes(source_node.unique_id, new_node.unique_id)
-            else:
-                 # This should not happen if previous_pointer_location is always valid after first move
-                 print(f"Critical Warning: Could not find source node at {previous_pointer_location} to connect to {new_node.name}")
-                 # Attempt to connect from input node as a last resort if it exists and isn't the new node
-                 if self.graph.input_node and self.graph.input_node != new_node:
-                      print(f"Attempting fallback connection from input node.")
-                      self.graph.connect_nodes(self.graph.input_node.unique_id, new_node.unique_id)
-                 else:
-                      # If connection fails completely, the node is isolated. This might be okay
-                      # depending on the desired graph structures, but likely indicates an issue.
-                      print(f"Warning: Node {new_node.name} added but could not be connected.")
+            # --- 4a. Forward Connection (From Row Above) ---
+            sources_above = []
+            if target_row > 0:
+                sources_above = self.graph.get_nodes_in_row(target_row - 1)
+                # print(f"Debug: Sources in row {target_row - 1}: {[s.name for s in sources_above]}") # Debug
+                for source_node in sources_above:
+                    self.graph.connect_nodes(source_node.unique_id, new_node.unique_id)
+
+            # Special Cases for row 0 and 1 connecting to Input Node
+            if self.graph.input_node and new_node != self.graph.input_node:
+                if target_row == 0: # Placed alongside input
+                    # print(f"Debug: Connecting node {new_node.name} at row 0 from Input") # Debug
+                    self.graph.connect_nodes(self.graph.input_node.unique_id, new_node.unique_id)
+                elif target_row == 1: # First layer after input
+                    # Ensure connection to input, even if row 0 had other nodes
+                    # connect_nodes handles duplicates, so this is safe
+                    # print(f"Debug: Ensuring node {new_node.name} at row 1 connects from Input") # Debug
+                    self.graph.connect_nodes(self.graph.input_node.unique_id, new_node.unique_id)
+
+            # Check if the node ended up with any inputs (excluding the input node itself)
+            if not new_node.inputs and new_node != self.graph.input_node:
+                 print(f"Warning: Node {new_node.name} at ({target_row},{target_col}) was added with no inputs.")
+
+
+            # --- 4b. Backward (Retroactive) Connection (To Row Below) ---
+            targets_below = []
+            if target_row + 1 <= self.graph.max_row: # Check if a row below exists
+                targets_below = self.graph.get_nodes_in_row(target_row + 1)
+                # print(f"Debug: Targets in row {target_row + 1}: {[t.name for t in targets_below]}") # Debug
+                for target_node in targets_below:
+                    if self.graph.connect_nodes(new_node.unique_id, target_node.unique_id):
+                         # Store which connections were made for potential reversal
+                         retro_connections_made.append((new_node, target_node))
+                         # print(f"Debug: Retroactively connected {new_node.name} -> {target_node.name}") # Debug
 
 
             # --- 5. Update Pointer ---
             self.pointer_location = (target_row, target_col)
 
             # --- 6. Check DAG ---
+            # This check MUST happen after ALL connections (forward and backward) are made
             if not self.graph.is_valid_dag():
+                # print(f"Debug: Cycle detected after adding {new_node.name} and connections.") # Debug
                 # Revert changes if cycle created
-                self.graph.remove_node(new_node) # remove_node handles grid/list/id cleanup
-                self.pointer_location = previous_pointer_location # Restore pointer
-                new_node = None # Ensure new_node is None so it's not used further
-                raise ValueError("Invalid move: Created a cycle.")
+                # 1. Undo retroactive connections explicitly
+                for source, target in retro_connections_made:
+                    target.remove_input(source) # Use the specific removal method
+                    # print(f"Debug: Reverted retro connection {source.name} -> {target.name}") # Debug
+
+                # 2. Remove the newly added node (this also removes forward connections pointing TO it)
+                self.graph.remove_node(new_node)
+                # print(f"Debug: Removed node {new_node.name} due to cycle.") # Debug
+
+                # 3. Restore pointer
+                self.pointer_location = previous_pointer_location
+
+                # 4. Raise error
+                new_node = None # Ensure new_node is None
+                raise ValueError("Invalid move: Created a cycle (potentially via retroactive connections).")
 
             # --- 7. Evaluate Graph & Calculate Reward ---
+            # (Evaluation and Reward logic remains the same as previous version)
             self.graph.set_output_node(new_node) # Evaluate based on the newly added node
             current_loss = float('inf')
-            eval_output_np = None # Initialize to None
+            eval_output_np = None
 
-            # Ensure graph has input and output nodes before evaluation
             if self.graph.input_node and self.graph.output_node:
                  eval_output_np = self.graph.forward_pass(self.current_inputs, self.operations_impl)
             else:
                  info['error'] = "Graph evaluation skipped: Missing input or output node."
-                 # Assign high loss if evaluation skipped
                  current_loss = (self.last_loss + 20.0) if np.isfinite(self.last_loss) else 100.0
                  reward = self.EVAL_FAILURE_PENALTY
 
-
-            # --- Reward Calculation Logic (Sequence MSE) ---
             if eval_output_np is not None:
-                # <<< --- START MODIFICATION --- >>>
-                # Clip the output values to prevent overflow during loss calculation
-                CLIP_VALUE = 1e6 # Define a reasonable clipping value
+                CLIP_VALUE = 1e6
                 eval_output_np = np.clip(eval_output_np, -CLIP_VALUE, CLIP_VALUE)
-                # <<< --- END MODIFICATION --- >>>
 
-                # Expected output shape: (batch, seq_len, feature_dim)
                 if eval_output_np.shape == self.target_outputs.shape:
                     try:
-                        # Calculate MSE loss
                         diff = eval_output_np - self.target_outputs
-                        loss = np.mean(diff * diff) # Use mean squared error
+                        loss = np.mean(diff * diff)
 
                         if np.isnan(loss) or np.isinf(loss):
-                            current_loss = 100.0 # Assign large finite loss for bad numerics
+                            current_loss = 100.0
                             reward = self.NAN_INF_LOSS_PENALTY
                             info['error'] = "Evaluation resulted in NaN/Inf loss."
                         else:
                             current_loss = loss
-                            # Reward = Improvement - Accuracy Penalty - Expansion Penalty
-                            finite_last_loss = self.last_loss if np.isfinite(self.last_loss) else 100.0 # Use a large number if last loss was inf
+                            finite_last_loss = self.last_loss if np.isfinite(self.last_loss) else 100.0
                             improvement = finite_last_loss - current_loss
                             accuracy_penalty = self.ACCURACY_PENALTY_WEIGHT * current_loss
                             reward = improvement - accuracy_penalty
-
                     except Exception as loss_calc_e:
                          current_loss = 100.0
                          reward = self.LOSS_CALC_ERROR_PENALTY
                          info['error'] = f"Error during loss calculation: {loss_calc_e}"
                          traceback.print_exc()
-
                 else:
-                    # Shape mismatch penalty
                     current_loss = (self.last_loss + 10.0) if np.isfinite(self.last_loss) else 100.0
                     reward = self.SHAPE_MISMATCH_PENALTY
                     info['error'] = f"Output shape mismatch: Expected {self.target_outputs.shape}, Got {eval_output_np.shape}"
-            # Check if eval failed AND no specific error was set yet
             elif 'error' not in info or not info['error']:
-                # Forward pass failed or produced None output without specific reason caught above
                 current_loss = (self.last_loss + 20.0) if np.isfinite(self.last_loss) else 100.0
                 reward = self.EVAL_FAILURE_PENALTY
                 info['error'] = "Graph evaluation failed or produced None output."
 
-            # --- Apply Expansion Penalty ---
             expanded_grid = (self.graph.max_row > prev_max_row) or (self.graph.max_col > prev_max_col)
             if expanded_grid:
                 reward -= self.EXPANSION_PENALTY
@@ -843,11 +871,13 @@ class MathSelfPlayEnv(gym.Env):
         except ValueError as e: # Catch specific ValueErrors from validation/placement/cycle
             reward = self.INVALID_MOVE_PENALTY
             info['error'] = str(e)
-            # Restore pointer if move failed due to invalid placement/cycle etc.
-            self.pointer_location = previous_pointer_location
-            # Ensure graph state is consistent (new_node should not be in graph if error occurred before adding/connecting)
-            if new_node and new_node in self.graph.nodes:
-                 self.graph.remove_node(new_node) # Clean up if node was added before error
+            # Pointer and node removal are handled inside the DAG check block if cycle occurs
+            # If error was placement/validation, pointer needs restoring here
+            if "cycle" not in str(e): # Only restore pointer if error wasn't cycle (cycle logic handles it)
+                 self.pointer_location = previous_pointer_location
+            # Ensure node is removed if error happened before DAG check
+            if new_node and new_node in self.graph.nodes and "cycle" not in str(e):
+                 self.graph.remove_node(new_node)
 
         except Exception as e: # Catch unexpected errors during step
             reward = self.UNEXPECTED_STEP_ERROR_PENALTY
@@ -857,6 +887,10 @@ class MathSelfPlayEnv(gym.Env):
             info['termination_reason'] = 'unexpected_error'
             # Attempt to restore state
             self.pointer_location = previous_pointer_location
+            # Undo potential retroactive connections if error happened after them but before DAG check failed
+            if retro_connections_made:
+                 for source, target in retro_connections_made:
+                      target.remove_input(source)
             if new_node and new_node in self.graph.nodes:
                  self.graph.remove_node(new_node)
 
@@ -865,32 +899,22 @@ class MathSelfPlayEnv(gym.Env):
         self.current_player = 3 - self.current_player # Switch between 1 and 2
 
         # --- 9. Check Termination Conditions ---
-        if not terminated: # Only check these if not already terminated by error
+        if not terminated:
             if self.steps_taken >= self.max_steps:
                 terminated = True
                 info['termination_reason'] = 'max_steps_reached'
             elif len(self.graph.nodes) >= self.max_nodes:
                  terminated = True
                  info['termination_reason'] = 'max_nodes_reached'
-            # Add termination based on loss? (e.g., if loss is extremely low)
-            # elif np.isfinite(self.last_loss) and self.last_loss < 1e-5:
-            #      terminated = True
-            #      info['termination_reason'] = 'loss_threshold_reached'
-
 
         # --- 10. Prepare return values ---
         observation = self._get_observation()
-        # Ensure reward is finite
         if not np.isfinite(reward):
-             print(f"Warning: Non-finite reward calculated ({reward}). Clamping to {self.UNEXPECTED_STEP_ERROR_PENALTY}.")
+             print(f"Warning: Non-finite reward calculated ({reward}). Clamping.")
              reward = self.UNEXPECTED_STEP_ERROR_PENALTY
-
-        # Use truncated flag if termination is due to time limit (max_steps) rather than task completion
         truncated = (info.get('termination_reason') == 'max_steps_reached')
-        if truncated:
-             terminated = False # Gymnasium standard: truncated=True means terminated=False
-
-        info['last_loss'] = self.last_loss if np.isfinite(self.last_loss) else 100.0 # Report finite loss
+        if truncated: terminated = False
+        info['last_loss'] = self.last_loss if np.isfinite(self.last_loss) else 100.0
 
         return observation, reward, terminated, truncated, info
 
@@ -993,6 +1017,17 @@ class MathSelfPlayEnv(gym.Env):
         for r in range(self.grid_size):
             print(f"{r}|" + "|".join(f"{cell:^6}" for cell in grid_repr[r]) + "|")
         print("  " + "-" * (self.grid_size * 7 - 1))
+
+        # --- Add connection details ---
+        print("\nConnections (Target <- Sources):")
+        sorted_nodes = sorted(self.graph.nodes, key=lambda n: (n.position[0], n.position[1]) if n.position else (999, 999))
+        for node in sorted_nodes:
+             if node.inputs:
+                  input_names = sorted([inp.name for inp in node.inputs])
+                  print(f"  {node.name} <- {input_names}")
+             else:
+                  print(f"  {node.name} <- []")
+        # --- End connection details ---
 
         print("-" * (self.grid_size * 7))
 
