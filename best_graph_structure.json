@@ -1,0 +1,286 @@
+[
+    {
+        "unique_id": 137226753061712,
+        "op_id": -1,
+        "name": "Input_0_P1",
+        "position": [
+            0,
+            0
+        ],
+        "player_id": 1,
+        "input_ids": []
+    },
+    {
+        "unique_id": 137222703345936,
+        "op_id": 12,
+        "name": "Set Intersection_1_P2",
+        "position": [
+            0,
+            1
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137226753061712
+        ]
+    },
+    {
+        "unique_id": 137226753075664,
+        "op_id": 9,
+        "name": "Inverse Fourier Transform_2_P2",
+        "position": [
+            0,
+            2
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137222703345936
+        ]
+    },
+    {
+        "unique_id": 137226734573904,
+        "op_id": 26,
+        "name": "Infimum_3_P2",
+        "position": [
+            1,
+            0
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137226753075664
+        ]
+    },
+    {
+        "unique_id": 137222746298640,
+        "op_id": 26,
+        "name": "Infimum_4_P2",
+        "position": [
+            2,
+            0
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137226734573904
+        ]
+    },
+    {
+        "unique_id": 137222557905744,
+        "op_id": 19,
+        "name": "Inner Product_5_P2",
+        "position": [
+            2,
+            1
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137222746298640
+        ]
+    },
+    {
+        "unique_id": 137222552303248,
+        "op_id": 32,
+        "name": "Entropy_6_P2",
+        "position": [
+            1,
+            1
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137222557905744
+        ]
+    },
+    {
+        "unique_id": 137222552202896,
+        "op_id": 2,
+        "name": "Multiplication_7_P1",
+        "position": [
+            1,
+            2
+        ],
+        "player_id": 1,
+        "input_ids": [
+            137222552303248
+        ]
+    },
+    {
+        "unique_id": 137226744409872,
+        "op_id": 20,
+        "name": "Matrix Multiplication_8_P2",
+        "position": [
+            1,
+            3
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137222552202896
+        ]
+    },
+    {
+        "unique_id": 137222552302736,
+        "op_id": 29,
+        "name": "Rotation_9_P1",
+        "position": [
+            0,
+            3
+        ],
+        "player_id": 1,
+        "input_ids": [
+            137226744409872
+        ]
+    },
+    {
+        "unique_id": 137222552195344,
+        "op_id": 26,
+        "name": "Infimum_10_P2",
+        "position": [
+            0,
+            4
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137222552302736
+        ]
+    },
+    {
+        "unique_id": 137222552193296,
+        "op_id": 11,
+        "name": "Set Union_11_P2",
+        "position": [
+            0,
+            5
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137222552195344
+        ]
+    },
+    {
+        "unique_id": 137226753286672,
+        "op_id": 9,
+        "name": "Inverse Fourier Transform_12_P1",
+        "position": [
+            0,
+            6
+        ],
+        "player_id": 1,
+        "input_ids": [
+            137222552193296
+        ]
+    },
+    {
+        "unique_id": 137222708747024,
+        "op_id": 23,
+        "name": "Factorial_13_P1",
+        "position": [
+            0,
+            7
+        ],
+        "player_id": 1,
+        "input_ids": [
+            137226753286672
+        ]
+    },
+    {
+        "unique_id": 137222552159888,
+        "op_id": 8,
+        "name": "Fourier Transform_14_P2",
+        "position": [
+            1,
+            7
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137222708747024
+        ]
+    },
+    {
+        "unique_id": 137222568122512,
+        "op_id": 23,
+        "name": "Factorial_15_P1",
+        "position": [
+            2,
+            7
+        ],
+        "player_id": 1,
+        "input_ids": [
+            137222552159888
+        ]
+    },
+    {
+        "unique_id": 137222559955280,
+        "op_id": 1,
+        "name": "Subtraction_16_P2",
+        "position": [
+            2,
+            6
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137222568122512
+        ]
+    },
+    {
+        "unique_id": 137222551895376,
+        "op_id": 20,
+        "name": "Matrix Multiplication_17_P1",
+        "position": [
+            1,
+            6
+        ],
+        "player_id": 1,
+        "input_ids": [
+            137222559955280
+        ]
+    },
+    {
+        "unique_id": 137222552204944,
+        "op_id": 5,
+        "name": "Root Extraction_18_P2",
+        "position": [
+            1,
+            5
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137222551895376
+        ]
+    },
+    {
+        "unique_id": 137222552271248,
+        "op_id": 12,
+        "name": "Set Intersection_19_P2",
+        "position": [
+            1,
+            4
+        ],
+        "player_id": 2,
+        "input_ids": [
+            137222552204944
+        ]
+    },
+    {
+        "unique_id": 137222558082192,
+        "op_id": 26,
+        "name": "Infimum_20_P1",
+        "position": [
+            2,
+            4
+        ],
+        "player_id": 1,
+        "input_ids": [
+            137222552271248
+        ]
+    },
+    {
+        "unique_id": 137222558086928,
+        "op_id": 0,
+        "name": "Addition_21_P1",
+        "position": [
+            2,
+            3
+        ],
+        "player_id": 1,
+        "input_ids": [
+            137222558082192
+        ]
+    }
+]

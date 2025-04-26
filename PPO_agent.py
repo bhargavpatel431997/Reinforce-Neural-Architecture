@@ -1144,41 +1144,44 @@ if __name__ == "__main__":
     from math_env import MathSelfPlayEnv # Use the correct env name
 
     # --- Configuration ---
-    GRID_SIZE = 5 # Keep grid size reasonable
-    MAX_STEPS = 20 # Max steps per episode
-    # --- MNIST/Classification Specific ---
-    INTERMEDIATE_FEATURE_DIM = 64 # Dimension for graph nodes
-    ENV_BATCH_SIZE = 64 # Batch size for MNIST evaluation within env
-    DATASET_PATH = './mnist_data' # Path to download/load MNIST
+    # Using defaults from math_env.py for grid_size (10) and max_steps (50)
+    # GRID_SIZE = 10 # Or override default here
+    # MAX_STEPS = 50 # Or override default here
+
+    # --- Sequence-to-Sequence Specific ---
+    FEATURE_DIM = 8     # Feature dimension for sequence embeddings (must match MathNode default or env init)
+    SEQ_LEN = 15        # Sequence length for the task
+    ENV_BATCH_SIZE = 64 # Batch size for sequence evaluation within env
+
     # --- PPO Hyperparameters ---
     BUFFER_SIZE = 2048
     PPO_BATCH_SIZE = 64
     UPDATE_EPOCHS = 10
-    NUM_EPISODES = 1000 # Increase for better results
-    LR = 3e-4 # Learning rate
-    POLICY_SAVE_PATH = "ppo_mnist_policy_checkpoints" # Directory to save policy models
-    GRAPH_SAVE_PATH = "ppo_mnist_graphs" # Directory to save best graph structure
+    NUM_EPISODES = 1000 # Number of training episodes
+    LR = 5e-4 # Learning rate (might need tuning for seq2seq)
+    POLICY_SAVE_PATH = "ppo_seq2seq_policy_checkpoints" # Directory to save policy models
+    GRAPH_SAVE_PATH = "ppo_seq2seq_graphs" # Directory to save best graph structure
 
     # Create save directories if they don't exist
-    for path in [POLICY_SAVE_PATH, GRAPH_SAVE_PATH, DATASET_PATH]:
+    for path in [POLICY_SAVE_PATH, GRAPH_SAVE_PATH]:
         if path and not os.path.exists(path):
             os.makedirs(path)
 
-    print("Initializing Environment for MNIST Classification...")
+    print("Initializing Environment for Sequence-to-Sequence Task...")
     try:
         env = MathSelfPlayEnv(
-            grid_size=GRID_SIZE,
-            max_steps=MAX_STEPS,
-            feature_dim=INTERMEDIATE_FEATURE_DIM, # Pass intermediate dim
-            batch_size=ENV_BATCH_SIZE, # Env's internal batch size for data
-            dataset_path=DATASET_PATH
-            # sequence_length is no longer needed
+            # grid_size=GRID_SIZE, # Omit to use default
+            # max_steps=MAX_STEPS, # Omit to use default
+            feature_dim=FEATURE_DIM, # Pass sequence feature dim
+            batch_size=ENV_BATCH_SIZE,
+            sequence_length=SEQ_LEN
+            # dataset_path is no longer needed
         )
         print(f"Environment Initialized.")
+        print(f"Grid Size: {env.grid_size}, Max Steps: {env.max_steps}")
         print(f"Number of operations: {env.num_operations}")
-        print(f"Graph Node Feature Dim: {env.feature_dim}")
-        print(f"Input Image Dim: {env.input_feature_dim}")
-        print(f"Number of Classes: {env.num_classes}")
+        print(f"Sequence Feature Dim: {env.feature_dim}")
+        print(f"Sequence Length: {env.sequence_length}")
 
     except Exception as env_init_e:
          print(f"!!! Error Initializing Environment: {env_init_e}")
@@ -1216,7 +1219,7 @@ if __name__ == "__main__":
     # --- Training ---
     agent.train(
         num_episodes=NUM_EPISODES,
-        max_steps_per_episode=MAX_STEPS, # Use env's max_steps
+        max_steps_per_episode=env.max_steps, # Use env's max_steps
         save_path=POLICY_SAVE_PATH,
         graph_save_path=GRAPH_SAVE_PATH # Pass graph save path
     )
@@ -1226,9 +1229,9 @@ if __name__ == "__main__":
     best_policy_path = os.path.join(POLICY_SAVE_PATH, "selfplay_transformer_ppo_policy_best.pth")
     if os.path.exists(best_policy_path):
         agent.load(best_policy_path)
-        agent.test(num_episodes=10, render=False) # Render less useful for classification
+        agent.test(num_episodes=10, render=True) # Render can be useful for seq2seq grid
     else:
         print("Best policy model not found, testing with the final model.")
-        agent.test(num_episodes=10, render=False)
+        agent.test(num_episodes=10, render=True)
 
     env.close()
