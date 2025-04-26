@@ -107,26 +107,27 @@ The training process (`agent.train`) involves simulating many episodes:
 
 ```mermaid
 graph TD
-    A[Start Episode] --> B(Reset Env: Get MNIST Batch, Empty Graph);
-    B --> C{Episode Not Done?};
-    C -- Yes --> D[Get Current Player & Board State];
-    D --> E["Agent's Policy Network Processes State"];
-    E --> F["Agent Samples Action (Op ID, Placement)"]; %% <-- Fixed line
-    F --> G[Env Executes Action: Place Node, Connect];
-    G --> H{Valid Move? (DAG, Grid)};
-    H -- No --> I[Penalize Agent, Revert (Implicitly via Error)];
-    H -- Yes --> J[Env Evaluates Graph on MNIST Batch];
-    J --> K[Env Calculates Loss & Reward];
-    K --> L["Store (State, Action, Reward, Done, LogProb, Value) in Buffer"]; %% <-- Also quoted for safety
-    L --> M{Buffer Full?};
-    M -- Yes --> N[Agent Updates Policy via PPO using Buffer Data];
-    N --> O[Clear Buffer];
-    M -- No --> O;
-    O --> P[Switch Player, Update State];
-    P --> C;
-    C -- No --> Q[End Episode];
-    Q --> R{Track Best Graph?};
-    R -- Yes --> S[Save Best Graph Structure (JSON)];
-    R -- No --> T[Repeat for Next Episode];
-    S --> T;
-    I --> P;
+    A[Start Episode] --> B(Reset Env: Get MNIST Batch, Empty Graph)
+    B --> C{Episode Not Done?}
+    C -- Yes --> D[Get Current Player & Board State]
+    D --> E["Agent's Policy Network Processes State"]
+    E --> F["Agent Samples Action (Op ID, Placement)"]
+    F --> G[Env Executes Action: Place Node, Connect]
+    G --> H{Valid Move? DAG, Grid}
+    H -- No --> I[Penalize Agent, Revert]
+    H -- Yes --> J[Env Evaluates Graph on MNIST Batch]
+    J --> K[Env Calculates Loss & Reward]
+    K --> L["Store (State, Action, Reward, Done, LogProb, Value) in Buffer"]
+    L --> M{Buffer Full?}
+    M -- Yes --> N[Agent Updates Policy via PPO using Buffer Data]
+    N --> O[Clear Buffer]
+    M -- No --> O
+    O --> P[Switch Player, Update State]
+    P --> C
+    C -- No --> Q[End Episode]
+    Q --> R{Track Best Graph?}
+    R -- Yes --> S[Save Best Graph Structure JSON]
+    R -- No --> T[Repeat for Next Episode]
+    S --> T
+    I --> P
+```
