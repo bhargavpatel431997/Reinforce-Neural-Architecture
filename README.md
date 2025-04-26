@@ -47,3 +47,83 @@ The goal is to allow the AI to explore beyond human-designed architectures—pot
 | **Geometry**               | Translation               | `T_v(P)`                | `P + v`                                 | Translation by –v              | `T_{−v}(P)`           | `P + (−v)`                                  |
 | **Geometry**               | Scaling                   | `S_k(P)`                | multiplies distance from center by k    | Scaling by 1/k                 | `S_{1/k}(P)`         | divides distance by k                       |
 | **Algebraic Structures**   | Group Operation          | `a ⋆ b`                 | associative binary op with identity      | Group Inverse                  | `a⁻¹`                   | `a⋆a⁻¹=e`                                   |
+
+
+## Core Idea
+
+The system treats neural network architecture generation as a game played on a grid. Two players (controlled by the **same** PPO agent policy) take turns placing computational nodes (mathematical operations) onto the grid. The goal is to build a graph that, when evaluated on MNIST data, achieves low classification loss.
+
+## Components
+
+1.  **Environment (`MathSelfPlayEnv` in `math_env.py`)**
+    *   **The Game Board:** Provides a `grid_size` x `grid_size` space where the network graph is built.
+    *   **MNIST Task:**
+        *   Loads the MNIST dataset using `torchvision`.
+        *   Holds the current batch of images (`self.current_inputs`) and labels (`self.target_outputs`).
+        *   Includes fixed input (`self.input_embedding`) and output (`self.output_projection`) linear layers. These are *not* part of the generated graph but act as adapters:
+            *   `input_embedding`: Maps flattened 784-pixel MNIST images to the graph's internal `feature_dim`.
+            *   `output_projection`: Maps the graph's final output (with `feature_dim`) to the 10 MNIST classes (logits).
+    *   **Graph Host:** Contains the `ComputationalGraph` instance (`self.graph`) being built.
+    *   **State Representation:** Provides the current state to the agent as an observation dictionary, primarily containing the `board` state (a multi-channel tensor representing node types, player ownership, and pointer location on the grid).
+    *   **Evaluation:** When requested by the agent (implicitly during `env.step`), it evaluates the *current* graph:
+        1.  Applies `self.input_embedding` to the current MNIST batch.
+        2.  Performs a `forward_pass` through the constructed `self.graph`.
+        3.  Applies `self.output_projection` to the graph's output.
+        4.  Calculates `CrossEntropyLoss` against the target labels.
+    *   **Reward Calculation:** Computes the reward signal based on the evaluation loss (see Reward System section).
+
+2.  **Agent (`SelfPlayPPOAgent` in `PPO_agent.py`)**
+    *   **The Player:** A single PPO agent instance is used for *both* Player 1 and Player 2.
+    *   **Policy Network:** Contains the `SelfPlayTransformerPPONetwork` which decides the actions.
+    *   **Actions:** At each turn, the agent chooses:
+        *   `operation_id`: Which mathematical operation node to place (e.g., Addition, Convolution, Rotation).
+        *   `placement_strategy`: Where to place the node relative to the previous node (Up, Down, Left, Right).
+    *   **Learning:** Updates its policy network using experiences gathered from both players' turns stored in a replay buffer (`self.buffer`).
+
+3.  **Policy Network (`SelfPlayTransformerPPONetwork` in `PPO_agent.py`)**
+    *   **The Brain:** A Transformer-based network.
+    *   **Input:** Takes the `board` state tensor from the environment observation.
+    *   **Processing:** Uses an `EnhancedGraphTransformerEncoder` (which internally uses Graph Attention) to process the spatial and operational information on the grid.
+    *   **Output:**
+        *   Probability distributions over `operation_id` and `placement_strategy`.
+        *   A value estimate `V(s)` for the current state (used by PPO).
+
+4.  **Computational Graph (`ComputationalGraph` in `math_env.py`)**
+    *   **The Generated Network:** Represents the neural network architecture being built.
+    *   **Nodes (`MathNode`):** Each node contains:
+        *   A specific mathematical operation (`op_id`).
+        *   Learnable affine parameters (`W`, `b`) applied *after* the core operation. These parameters adapt *within* the generated structure.
+        *   Connections to its input nodes.
+    *   **Evaluation (`forward_pass`):** Executes the graph topologically, applying node operations and learnable parameters.
+    *   **Serialization (`serialize_graph`):** Converts the graph structure (nodes, positions, connections) into a saveable format (list of dictionaries).
+
+## The Self-Play Loop & Learning
+
+The training process (`agent.train`) involves simulating many episodes:
+
+```mermaid
+graph TD
+    A[Start Episode] --> B(Reset Env: Get MNIST Batch, Empty Graph)
+    B --> C{Episode Not Done?}
+    C -- Yes --> D[Get Current Player & Board State]
+    D --> E["Agent's Policy Network Processes State"]
+    E --> F["Agent Samples Action (Op ID, Placement)"]
+    F --> G[Env Executes Action: Place Node, Connect]
+    G --> H{Valid Move? DAG, Grid}
+    H -- No --> I[Penalize Agent, Revert]
+    H -- Yes --> J[Env Evaluates Graph on MNIST Batch]
+    J --> K[Env Calculates Loss & Reward]
+    K --> L["Store (State, Action, Reward, Done, LogProb, Value) in Buffer"]
+    L --> M{Buffer Full?}
+    M -- Yes --> N[Agent Updates Policy via PPO using Buffer Data]
+    N --> O[Clear Buffer]
+    M -- No --> O
+    O --> P[Switch Player, Update State]
+    P --> C
+    C -- No --> Q[End Episode]
+    Q --> R{Track Best Graph?}
+    R -- Yes --> S[Save Best Graph Structure JSON]
+    R -- No --> T[Repeat for Next Episode]
+    S --> T
+    I --> P
+```
