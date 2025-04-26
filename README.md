@@ -110,14 +110,14 @@ graph TD
     A[Start Episode] --> B(Reset Env: Get MNIST Batch, Empty Graph);
     B --> C{Episode Not Done?};
     C -- Yes --> D[Get Current Player & Board State];
-    D --> E[Agent's Policy Network Processes State];
-    E --> F[Agent Samples Action (Op ID, Placement)];
+    D --> E["Agent's Policy Network Processes State"];
+    E --> F["Agent Samples Action (Op ID, Placement)"]; %% <-- Fixed line
     F --> G[Env Executes Action: Place Node, Connect];
     G --> H{Valid Move? (DAG, Grid)};
     H -- No --> I[Penalize Agent, Revert (Implicitly via Error)];
     H -- Yes --> J[Env Evaluates Graph on MNIST Batch];
     J --> K[Env Calculates Loss & Reward];
-    K --> L[Store (State, Action, Reward, Done, LogProb, Value) in Buffer];
+    K --> L["Store (State, Action, Reward, Done, LogProb, Value) in Buffer"]; %% <-- Also quoted for safety
     L --> M{Buffer Full?};
     M -- Yes --> N[Agent Updates Policy via PPO using Buffer Data];
     N --> O[Clear Buffer];
@@ -130,4 +130,3 @@ graph TD
     R -- No --> T[Repeat for Next Episode];
     S --> T;
     I --> P;
-
