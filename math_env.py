@@ -1,3 +1,21 @@
+"""
+Reinforce Neural Architecture
+Copyright (C) 2025 Bhargav Patel
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+"""
 # -*- coding: utf-8 -*-
 import gymnasium as gym
 from gymnasium import spaces
@@ -5,480 +23,738 @@ import numpy as np
 import copy
 from typing import List, Dict, Tuple, Any, Optional
 import random
-import string # <-- Re-add string import
+import string
 import math
-from scipy import signal
-# from scipy.fft import fft, ifft # Use np.fft instead for simplicity if complex handling is tricky
-import numpy.fft as np_fft # Use numpy's fft
-from scipy import special # For comb (binomial coefficient)
-import traceback # For detailed error printing
+# from scipy import signal # Replace signal processing with PyTorch equivalents if needed
+# import numpy.fft as np_fft # Replace with torch.fft
+# from scipy import special # Keep for Factorial/Binomial Coeff CPU calculation if complex on GPU
+import traceback
 import json
 
-# --- REMOVE TORCH/TORCHVISION IMPORTS ---
-# import torch
-# import torch.nn as nn
-# import torchvision
-# import torchvision.transforms as transforms
-# from torch.utils.data import DataLoader
-# --- END REMOVAL ---
+# --- PyTorch Imports ---
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.fft as torch_fft
+# --- End PyTorch Imports ---
 
 
-# --- MathNode Class ---
-# Use a smaller default feature_dim suitable for sequence tasks
+# --- MathNode Class (PyTorch Version - Unchanged from previous) ---
 class MathNode:
     """
-    Represents a mathematical operation node in the computational graph.
-    Each node applies a specific mathematical function to its inputs,
-    followed by a learnable affine transformation (W @ result + b).
+    Represents a mathematical operation node using PyTorch.
+    Learnable parameter `learnable_param` acts as 'y' in f(x, y) for binary ops,
+    or as bias/scale for specific unary ops.
     """
-    def __init__(self, op_id: int, name: str, inputs=None, parameters=None, feature_dim=8, player_id=0): # Smaller default feature_dim
+    def __init__(self,
+                 op_id: int,
+                 name: str,
+                 op_info: Dict, # Contains 'arity', 'name', 'core_func', 'vectorized'
+                 inputs: Optional[List['MathNode']] = None,
+                 feature_dim: int = 8,
+                 player_id: int = 0,
+                 device: torch.device = torch.device('cpu')):
+
         self.op_id = op_id
         self.name = name
+        self.op_info = op_info
+        self.arity = op_info.get('arity', 0) # Get arity from op_info
         self.inputs = inputs or [] # List of input MathNode objects
-        self.parameters = parameters or {}
-        self.output = None
-        self.position = None
-        self.output_shape = None
+        self.output_tensor: Optional[torch.Tensor] = None # Stores PyTorch tensor output
+        self.position = None # (row, col) on the grid
+        self.output_shape = None # Store runtime shape
         self.player_id = player_id
+        self.unique_id = id(self) # Unique identifier for this node instance
+        self.device = device
 
-        # Initialize learnable parameters with specific dtype
-        self.learnable_params = {
-            'W': (np.random.randn(feature_dim, feature_dim) * 0.1).astype(np.float32),
-            'b': np.zeros(feature_dim, dtype=np.float32)
-        }
-        self.unique_id = id(self)
+        # --- Learnable Parameter Handling (Revised) ---
+        self.learnable_param: Optional[nn.Parameter] = None
+        self.learnable_role: Optional[str] = None # e.g., 'operand_y', 'bias', 'scale', 'kernel'
+
+        if self.arity == 2:
+            # For binary ops, 'y' (second operand) is the learnable parameter.
+            # Default shape (F, F) for matrix multiplication flexibility.
+            # Core functions for element-wise ops will adapt (e.g., use diagonal).
+            self.learnable_role = 'operand_y'
+            param_shape = (feature_dim, feature_dim)
+            # Initialize near identity for multiplication, near zero for addition? Or just random.
+            initial_value = torch.randn(param_shape, device=self.device, dtype=torch.float32) * 0.1
+            # torch.eye(feature_dim, device=self.device, dtype=torch.float32) # Alternative: near identity
+            self.learnable_param = nn.Parameter(initial_value)
+            # print(f"Node {self.name}: Arity 2, Role: {self.learnable_role}, Param Shape: {self.learnable_param.shape}") # Debug
+
+        elif self.arity == 1 and op_info.get('learnable_param_role'):
+             # Unary ops can have specific learnable params (e.g., bias, scale)
+             role = op_info['learnable_param_role']
+             self.learnable_role = role
+             if role == 'bias':
+                 param_shape = (feature_dim,)
+                 initial_value = torch.zeros(param_shape, device=self.device, dtype=torch.float32)
+             elif role == 'scale':
+                 param_shape = (feature_dim,)
+                 initial_value = torch.ones(param_shape, device=self.device, dtype=torch.float32)
+             # Add other roles (e.g., 'kernel' for unary conv?) if needed
+             else:
+                  print(f"Warning: Unknown learnable_param_role '{role}' for unary op {self.name}. No param created.")
+                  self.learnable_role = None # Reset role if unknown
+                  param_shape = None
+
+             if param_shape:
+                  # Detach initial value before creating parameter
+                  self.learnable_param = nn.Parameter(initial_value.detach())
+                  # print(f"Node {self.name}: Arity 1, Role: {self.learnable_role}, Param Shape: {self.learnable_param.shape}") # Debug
+
+        # Else (arity 0 or 1 without specified role), learnable_param remains None
 
     def add_input(self, node: 'MathNode'):
-        """Adds an input node if it's not already present."""
-        # Check by object identity or unique_id to prevent duplicates
         if node not in self.inputs:
             self.inputs.append(node)
 
     def remove_input(self, node: 'MathNode'):
-        """Removes a specific input node."""
-        if node in self.inputs:
+        try:
             self.inputs.remove(node)
+        except ValueError:
+            pass
 
-    def set_parameters(self, parameters):
-        self.parameters = parameters
+    def get_parameters(self) -> List[nn.Parameter]:
+        """Returns the learnable parameter of this node if it exists."""
+        return [self.learnable_param] if self.learnable_param is not None else []
 
     def __repr__(self):
         input_ids = [inp.unique_id for inp in self.inputs]
-        return f"MathNode(id={self.unique_id}, name={self.name}, op={self.op_id}, pos={self.position}, player={self.player_id}, inputs={input_ids})"
+        op_name_str = f"Op({self.op_id}:{self.op_info.get('name', 'N/A')})" if self.op_id != -1 else "Input"
+        learn_info = ""
+        if self.learnable_param is not None:
+             p_shape = tuple(self.learnable_param.shape)
+             learn_info = f", LRole={self.learnable_role}, P={p_shape}" # Use LRole
+
+        return (f"MathNode(id={self.unique_id}, name={self.name}, op={op_name_str}, "
+                f"pos={self.position}, player={self.player_id}, inputs={input_ids}{learn_info})")
 
 
-# --- ComputationalGraph Class ---
+# --- ComputationalGraph Class (PyTorch Version - Unchanged Internally) ---
 class ComputationalGraph:
     """
-    Represents a computational graph of mathematical operation nodes.
-    Adapted for the self-play environment with a single input and dynamic output.
+    Represents a computational graph of MathNodes using PyTorch tensors.
+    Manages node addition, connections, and forward pass execution.
     """
-    def __init__(self):
-        self.nodes = []         # All nodes in the graph, ordered by addition
-        self.nodes_by_id = {}   # Map unique_id to node
-        self.input_node = None  # Single input node (the first node added)
-        self.output_node = None # Node designated as output for the current evaluation
-        self.grid = {}          # Dictionary mapping (row, col) to node
-        self.max_row = -1       # Track max row index used
-        self.max_col = -1       # Track max col index used
+    def __init__(self, device: torch.device = torch.device('cpu')):
+        self.nodes: List[MathNode] = []
+        self.nodes_by_id: Dict[int, MathNode] = {}
+        self.input_node: Optional[MathNode] = None
+        self.output_node: Optional[MathNode] = None
+        self.grid: Dict[Tuple[int, int], MathNode] = {}
+        self.max_row = -1
+        self.max_col = -1
+        self.device = device
 
     def add_node(self, node: MathNode, row: int, col: int):
-        """Add a node to the graph at the specified position."""
         if self.get_node_at(row, col) is not None:
-            raise ValueError(f"Position ({row},{col}) is already occupied.")
+            raise ValueError(f"Position ({row},{col}) is already occupied by {self.get_node_at(row, col)}.")
+        if node.device != self.device:
+             print(f"Warning: Adding node with device {node.device} to graph with device {self.device}")
+             # Move node's parameter to graph's device
+             if node.learnable_param is not None:
+                 node.learnable_param.data = node.learnable_param.data.to(self.device)
+             node.device = self.device
 
         self.nodes.append(node)
         self.nodes_by_id[node.unique_id] = node
         node.position = (row, col)
         self.grid[(row, col)] = node
-        # Update max row/col *after* adding
         self.max_row = max(self.max_row, row)
         self.max_col = max(self.max_col, col)
 
-        # Designate the first node added as the input node
-        if len(self.nodes) == 1:
+        if len(self.nodes) == 1: # First node is input
             self.input_node = node
             node.op_id = -1 # Mark as input type
-            node.name = f"Input_0_P{node.player_id}" # Include player in name
+            node.name = f"Input_0_P{node.player_id}"
+            node.arity = 0 # Input node has arity 0
+            node.learnable_param = None
+            node.learnable_role = None
 
+    # --- remove_node, get_node_at, etc. (unchanged) ---
     def remove_node(self, node: MathNode):
         """Removes a node and cleans up references."""
-        if node in self.nodes:
-            self.nodes.remove(node)
+        if node not in self.nodes: return # Node already removed or never added
+
+        # Remove from main lists/dicts
+        self.nodes.remove(node)
         if node.unique_id in self.nodes_by_id:
             del self.nodes_by_id[node.unique_id]
         if node.position in self.grid:
             del self.grid[node.position]
-        if node == self.input_node:
-            self.input_node = None # Should only happen if reverting first move
-        if node == self.output_node:
-            self.output_node = None # Reset output if removed
 
-        # Remove connections pointing TO this node from other nodes' input lists
-        # This is crucial for undoing connections when a cycle is detected
-        nodes_to_check = list(self.nodes) # Iterate over a copy
+        # Reset input/output node if it's this one
+        if node == self.input_node: self.input_node = None
+        if node == self.output_node: self.output_node = None
+
+        # Remove connections *to* this node from its inputs (if any)
+        # Not strictly necessary if forward pass checks cache, but good practice
+        # (This part is tricky, remove_input is on the *target* node)
+
+        # Remove connections *from* this node (remove this node from other nodes' input lists)
+        nodes_to_check = list(self.nodes) # Iterate over remaining nodes
         for other_node in nodes_to_check:
-            other_node.remove_input(node) # Use the new remove_input method
+            other_node.remove_input(node) # Safely remove if present
 
-        # Clear the inputs list of the removed node itself (though it will be garbage collected)
-        node.inputs = []
+        node.inputs = [] # Clear its own inputs list
 
-        # Recalculate max_row/max_col (simple way)
+        # Recalculate grid boundaries (could be optimized)
         self.max_row = -1
         self.max_col = -1
-        for r, c in self.grid.keys():
-            self.max_row = max(self.max_row, r)
-            self.max_col = max(self.max_col, c)
+        if self.grid:
+            rows, cols = zip(*self.grid.keys())
+            self.max_row = max(rows)
+            self.max_col = max(cols)
 
 
     def get_node_at(self, row: int, col: int) -> Optional[MathNode]:
-        """Get the node at a specific position, or None."""
         return self.grid.get((row, col))
 
     def get_nodes_in_row(self, row: int) -> List[MathNode]:
-        """Get all nodes currently present in a specific row."""
-        return [node for (r, c), node in self.grid.items() if r == row]
+        return sorted([node for (r, c), node in self.grid.items() if r == row], key=lambda n: n.position[1]) # Sort by col
 
     def get_node_by_id(self, unique_id: int) -> Optional[MathNode]:
         return self.nodes_by_id.get(unique_id)
 
     def connect_nodes(self, source_node_id: int, target_node_id: int) -> bool:
-        """Connect nodes by their unique IDs. Avoids duplicates."""
         source = self.get_node_by_id(source_node_id)
         target = self.get_node_by_id(target_node_id)
-
-        if source and target:
-            # Use the add_input method which handles duplicates
+        if source and target and source != target: # Prevent self-loops explicitly
             target.add_input(source)
-            # print(f"Debug: Connected {source.name} ({source_id}) -> {target.name} ({target_id})") # Debug
             return True
-        # print(f"Warning: Could not connect {source_node_id} to {target_node_id}. Source or target not found.") # Reduce noise
+        elif source == target:
+             print(f"Warning: Attempted self-connection for node {source_node_id}. Ignored.")
         return False
 
     def set_output_node(self, node: MathNode):
-        """Designate a specific node as the output for evaluation."""
         if node in self.nodes:
             self.output_node = node
         else:
-            print(f"Warning: Cannot set output node {node}. Node not found in graph.")
-            self.output_node = None
+            # This can happen if the node was removed due to a cycle immediately after adding
+            # print(f"Warning: Cannot set output node {node}. Node not found in graph (possibly removed).")
+            self.output_node = None # Ensure output node is invalid
+
 
     def is_valid_dag(self) -> bool:
-        """Check if the graph is a valid DAG."""
-        visited = set()
-        recursion_stack = set()
+        """Checks if the graph is a Directed Acyclic Graph using Kahn's algorithm."""
+        if not self.nodes: return True # Empty graph is a DAG
 
-        def is_cyclic_util(node_id):
-            node = self.get_node_by_id(node_id)
-            if not node: return False # Should not happen
+        in_degree = {node.unique_id: 0 for node in self.nodes}
+        adj = {node.unique_id: [] for node in self.nodes}
 
-            visited.add(node_id)
-            recursion_stack.add(node_id)
+        # Build adjacency list and calculate in-degrees
+        for node in self.nodes:
+            # Check for self-loops within inputs list (shouldn't happen if connect_nodes prevents it)
+            if node in node.inputs:
+                print(f"Error: Node {node.name} found in its own inputs list.")
+                return False # Self-loop detected
 
-            # Check dependencies (inputs)
-            for neighbor in node.inputs:
-                neighbor_id = neighbor.unique_id
-                if neighbor_id not in visited:
-                    if is_cyclic_util(neighbor_id):
-                        # print(f"Debug: Cycle detected via {node.name} <- {neighbor.name}") # Debug
-                        return True
-                elif neighbor_id in recursion_stack:
-                    # print(f"Debug: Cycle detected: {node.name} depends on {neighbor.name} which is in recursion stack.") # Debug
-                    return True # Cycle detected
+            for inp_node in node.inputs:
+                # Ensure input node exists in the graph's dictionary before adding edge
+                if inp_node.unique_id in self.nodes_by_id and node.unique_id in self.nodes_by_id :
+                    if node.unique_id not in adj[inp_node.unique_id]: # Avoid duplicate edges in adj list
+                        adj[inp_node.unique_id].append(node.unique_id)
+                    in_degree[node.unique_id] += 1
+                else:
+                    # This indicates inconsistency between node.inputs and self.nodes_by_id
+                    print(f"Warning: Inconsistency detected during DAG check. Input node {inp_node.unique_id} or target node {node.unique_id} not in graph dict.")
+                    # Depending on severity, might want to return False here
+                    # return False
 
-            recursion_stack.remove(node_id)
-            return False
+        # Initialize queue with nodes having in-degree 0
+        queue = sorted([node_id for node_id, degree in in_degree.items() if degree == 0])
+        count = 0 # Count of visited nodes
 
-        # Check cycles starting from all nodes
-        node_ids = list(self.nodes_by_id.keys())
-        for node_id in node_ids:
-            if node_id not in visited:
-                # Reset recursion stack for each new starting node check
-                # recursion_stack = set() # No, recursion stack should persist within a single DFS path
-                if is_cyclic_util(node_id):
-                    return False
-        return True
+        while queue:
+            u_id = queue.pop(0)
+            count += 1
+
+            # Process neighbors
+            sorted_neighbors = sorted(adj.get(u_id, []))
+
+            for v_id in sorted_neighbors:
+                if v_id in in_degree:
+                    in_degree[v_id] -= 1
+                    if in_degree[v_id] == 0:
+                        queue.append(v_id)
+                else:
+                    # If v_id is not in in_degree, it implies v_id wasn't in self.nodes initially? Error.
+                    print(f"Error: Neighbor ID {v_id} of node {u_id} not found in in_degree map during DAG check.")
+                    return False # Indicate graph inconsistency
+
+            queue.sort() # Keep queue sorted for deterministic order (optional)
+
+        # If count matches number of nodes, it's a DAG
+        if count != len(self.nodes):
+             print(f"DAG Check Failed: Processed {count} nodes, expected {len(self.nodes)}. Possible cycle or disconnected components.")
+             # Debug: Print nodes with non-zero in-degree
+             # remaining_nodes = {nid: deg for nid, deg in in_degree.items() if deg > 0}
+             # print("Remaining nodes (potential cycle):", remaining_nodes)
+             return False
+        else:
+             return True
 
     def topological_sort(self) -> List[MathNode]:
-        """Return nodes in topological order."""
-        visited = set()
-        topo_order = []
-        visiting = set() # To detect cycles during sort
+        """Performs topological sort using Kahn's algorithm."""
+        if not self.nodes: return []
 
-        def visit(node_id):
-            node = self.get_node_by_id(node_id)
-            if not node: return # Node might have been removed
-            if node_id in visiting:
-                raise RuntimeError(f"Cycle detected during topological sort involving node {node.name} ({node_id})") # Should be caught by is_valid_dag earlier
-            if node_id in visited: return
+        in_degree = {node.unique_id: 0 for node in self.nodes}
+        adj = {node.unique_id: [] for node in self.nodes}
+        node_map = {node.unique_id: node for node in self.nodes} # Ensure map is current
 
-            visiting.add(node_id)
-            visited.add(node_id)
-
-            # Visit dependencies first (inputs)
-            # Sort inputs for deterministic order (optional but good practice)
-            sorted_input_nodes = sorted(node.inputs, key=lambda n: n.unique_id)
-            for inp in sorted_input_nodes:
-                visit(inp.unique_id)
-
-            visiting.remove(node_id)
-            topo_order.append(node)
-
-        # Ensure all nodes are considered
-        node_ids = list(self.nodes_by_id.keys()) # Use a copy of keys
-        for node_id in node_ids:
-             if node_id not in visited:
-                 visit(node_id)
-
-        return topo_order
-
-    # --- REMOVED input_embedding from forward_pass signature ---
-    def forward_pass(self, input_tensor: np.ndarray, operations: Dict[int, Dict]) -> Optional[np.ndarray]:
-        """
-        Perform forward pass. Assumes a single input tensor and a single designated output node.
-        Input tensor is now assumed to be (batch, seq_len, feature_dim).
-        """
-        if not self.input_node:
-            print("Error: Input node not set in graph.")
-            return None
-        if not self.output_node:
-             # If no output node is explicitly set, maybe default to the last added node?
-             # Or require it to be set before calling forward_pass.
-             # Current behavior: return None if output_node is not set.
-             print("Error: Output node not set in graph.")
-             return None
-
-        # Reset outputs
+        # Build adjacency list and calculate in-degrees
         for node in self.nodes:
-            node.output = None
-            node.output_shape = None
+            for inp_node in node.inputs:
+                 # Ensure both source and target nodes exist before adding edge
+                 if inp_node.unique_id in node_map and node.unique_id in node_map:
+                     if node.unique_id not in adj[inp_node.unique_id]:
+                         adj[inp_node.unique_id].append(node.unique_id)
+                     in_degree[node.unique_id] += 1
+                 else:
+                     # This case should ideally not happen if graph management is correct
+                     raise RuntimeError(f"Graph inconsistency during topological sort setup: Node {inp_node.unique_id} or {node.unique_id} not found in map.")
 
-        # --- Assign Raw Input Tensor ---
+        # Initialize queue with nodes having in-degree 0, sorted for determinism
+        queue = sorted([node_id for node_id, degree in in_degree.items() if degree == 0])
+        topo_order_ids = []
+
+        while queue:
+            u_id = queue.pop(0)
+            if u_id not in node_map:
+                 raise RuntimeError(f"Graph inconsistency: Node ID {u_id} from queue not found in node_map.")
+            topo_order_ids.append(u_id)
+
+            # Process neighbors, sorted for determinism
+            sorted_neighbors = sorted(adj.get(u_id, []))
+
+            for v_id in sorted_neighbors:
+                if v_id in in_degree:
+                    in_degree[v_id] -= 1
+                    if in_degree[v_id] == 0:
+                        queue.append(v_id)
+                else:
+                    # This indicates a serious graph inconsistency
+                     raise RuntimeError(f"Graph inconsistency: Neighbor ID {v_id} of node {u_id} not found in in_degree map.")
+
+            queue.sort() # Maintain sorted order
+
+        # Check if sort included all nodes
+        if len(topo_order_ids) == len(self.nodes):
+             # Return list of MathNode objects in topological order
+             return [node_map[node_id] for node_id in topo_order_ids]
+        else:
+             # Cycle detected or graph is disconnected in a way that not all nodes were reached
+             raise RuntimeError(f"Cycle detected or graph error during topological sort. Processed {len(topo_order_ids)} nodes, expected {len(self.nodes)}.")
+
+    # This method belongs inside the ComputationalGraph class
+    def forward_pass(self, input_tensor: torch.Tensor) -> Optional[torch.Tensor]:
+        """
+        Perform forward pass using PyTorch tensors.
+        Combines inputs via averaging (with broadcasting/expand for sequence and feature dims)
+        before feeding to a node. Calls the node's core operation function.
+        Requires input_tensor to be on the same device as the graph.
+        """
+        # --- Initial Checks ---
+        if not self.nodes:
+            print("Warning: Forward pass called on empty graph.")
+            return None
+        if self.input_node is None:
+            print("Error: Input node not set in graph for forward pass.")
+            return None
+        if self.input_node.unique_id not in self.nodes_by_id:
+            print(f"Error: Input node {self.input_node.unique_id} is no longer in the graph node map.")
+            return None
+        if self.output_node is None:
+            print("Error: Output node not set in graph for forward pass.")
+            return None
+        if self.output_node.unique_id not in self.nodes_by_id:
+            print(f"Error: Designated output node {self.output_node.name} ({self.output_node.unique_id}) is no longer in the graph.")
+            self.output_node = None # Invalidate the reference
+            return None
+
+        if input_tensor.device != self.device:
+            print(f"Warning: Input tensor device ({input_tensor.device}) differs from graph device ({self.device}). Moving input.")
+            input_tensor = input_tensor.to(self.device)
+
+        # --- Initialization ---
+        node_outputs: Dict[int, Optional[torch.Tensor]] = {}
+        final_output_value: Optional[torch.Tensor] = None
+
         try:
-            # input_tensor shape: (batch, seq_len, feature_dim)
-            if not isinstance(input_tensor, np.ndarray):
-                 raise TypeError(f"Input tensor must be a numpy array, got {type(input_tensor)}")
-            if input_tensor.ndim != 3:
-                 raise ValueError(f"Input tensor must have 3 dimensions (batch, seq, feat), got {input_tensor.ndim}")
+            # --- Assign Input Tensor to Cache ---
+            node_outputs[self.input_node.unique_id] = input_tensor
+            self.input_node.output_shape = tuple(input_tensor.shape)
+            self.input_node.output_tensor = input_tensor
 
-            self.input_node.output = input_tensor.copy().astype(np.float32) # Ensure float32
-            self.input_node.output_shape = input_tensor.shape
+            # --- Get Execution Order ---
+            sorted_nodes = self.topological_sort() # Can raise RuntimeError
+
+            # --- Execute Nodes in Order ---
+            for node in sorted_nodes:
+                if node == self.input_node:
+                    continue
+
+                # --- Step 1: Gather Inputs for the Current Node ---
+                inputs_ready = True
+                input_tensors_for_node: List[torch.Tensor] = []
+                all_input_shapes = []
+
+                if not node.inputs:
+                    print(f"Warning: Node {node.name} (id={node.unique_id}) has no inputs listed. Cannot evaluate.")
+                    inputs_ready = False
+                else:
+                    for inp_node in sorted(node.inputs, key=lambda n: n.unique_id):
+                        if inp_node.unique_id not in node_outputs:
+                            print(f"CRITICAL Error: Input {inp_node.name} ({inp_node.unique_id}) for node {node.name} ({node.unique_id}) not found in output cache. Aborting forward pass.")
+                            return None
+                        cached_output = node_outputs.get(inp_node.unique_id)
+                        if cached_output is None:
+                            print(f"Warning: Input {inp_node.name} ({inp_node.unique_id}) for node {node.name} ({node.unique_id}) has None value. Cannot use for calculation.")
+                            inputs_ready = False
+                            break
+                        input_tensors_for_node.append(cached_output)
+                        all_input_shapes.append(cached_output.shape)
+
+                # --- Step 2: Combine Inputs (if they were all valid) ---
+                combined_input_data: Optional[torch.Tensor] = None
+                if not inputs_ready:
+                    node_outputs[node.unique_id] = None
+                    node.output_tensor = None
+                    if node == self.output_node: final_output_value = None
+                    continue
+
+                if not input_tensors_for_node:
+                    print(f"Internal Error: Node {node.name} - inputs ready but no valid tensors collected.")
+                    node_outputs[node.unique_id] = None
+                    node.output_tensor = None
+                    if node == self.output_node: final_output_value = None
+                    continue
+                elif len(input_tensors_for_node) == 1:
+                    combined_input_data = input_tensors_for_node[0]
+                else:
+                    # --- Combine Multiple Inputs (Handling Seq AND Feature Dim Mismatches) ---
+                    processed_inputs = []
+                    target_batch_size = -1
+                    target_seq_len = -1
+                    target_feat_dim = -1
+                    combination_possible = True
+
+                    # First pass: Determine target dimensions and check basic compatibility
+                    for i, t in enumerate(input_tensors_for_node):
+                        if len(t.shape) == 3: # Expecting (Batch, Sequence, Feature)
+                            current_b, current_s, current_f = t.shape
+                            # Batch Size Check
+                            if target_batch_size == -1: target_batch_size = current_b
+                            elif current_b != target_batch_size:
+                                print(f"Error: Node {node.name} received inputs with different batch sizes {all_input_shapes}. Cannot combine.")
+                                combination_possible = False; break
+                            # Determine Target Sequence Length (Max of S, 1)
+                            if target_seq_len == -1: target_seq_len = current_s
+                            else: target_seq_len = max(target_seq_len, current_s)
+                            # Determine Target Feature Dimension (Max of F, 1)
+                            if target_feat_dim == -1: target_feat_dim = current_f
+                            else: target_feat_dim = max(target_feat_dim, current_f)
+                        else:
+                            print(f"Error: Node {node.name} received non-3D input tensor {t.shape} at index {i} (all shapes: {all_input_shapes}). Cannot combine.")
+                            combination_possible = False; break
+
+                    # Check if target dimensions are valid
+                    if not combination_possible or target_batch_size <= 0 or target_seq_len <= 0 or target_feat_dim <= 0:
+                        if combination_possible: # If dimensions were invalid but no explicit error
+                            print(f"Warning: Node {node.name} - Could not determine valid target dimensions from inputs {all_input_shapes}.")
+                        combination_possible = False # Mark as failed if dims invalid
+                    else:
+                        # Second pass: Process and expand each tensor to target shape
+                        target_shape = (target_batch_size, target_seq_len, target_feat_dim)
+                        for t in input_tensors_for_node:
+                            b, s, f = t.shape
+                            # Expand if needed, otherwise keep original
+                            needs_expand = (s != target_seq_len) or (f != target_feat_dim)
+                            if needs_expand:
+                                # Check if expansion is valid (only from 1 to N)
+                                if (s == 1 or s == target_seq_len) and (f == 1 or f == target_feat_dim):
+                                    try:
+                                        expanded_t = t.expand(*target_shape)
+                                        processed_inputs.append(expanded_t)
+                                    except RuntimeError as e:
+                                        print(f"Error expanding tensor shape {t.shape} to target {target_shape} for node {node.name}: {e}. Aborting combination.")
+                                        combination_possible = False; break
+                                else: # Invalid expansion (e.g., F=2 to F=8, or S=5 to S=10)
+                                    print(f"Error: Node {node.name} requires incompatible expansion from {t.shape} to {target_shape}. Inputs {all_input_shapes}. Cannot combine.")
+                                    combination_possible = False; break
+                            else:
+                                # Shape is already the target shape
+                                processed_inputs.append(t)
+
+                    # Third pass: Stack and average if combination was successful
+                    if combination_possible and processed_inputs:
+                        try:
+                            # Final shape check before stacking
+                            if not all(p.shape == target_shape for p in processed_inputs):
+                                print(f"Internal Error: Node {node.name} - Processed inputs have mismatched shapes {[p.shape for p in processed_inputs]} before stacking (Target: {target_shape}).")
+                                combination_possible = False
+                            else:
+                                stacked_inputs = torch.stack(processed_inputs, dim=0)
+                                combined_input_data = torch.mean(stacked_inputs, dim=0)
+                        except Exception as e:
+                              print(f"Error stacking/averaging processed inputs for node {node.name}: {e}. Setting combination to failed.")
+                              combination_possible = False
+
+                    # Assign Fallback if combination failed at any point
+                    if not combination_possible:
+                        # *** CHANGE: Instead of fallback, mark as failure ***
+                        print(f"Marking Node {node.name} evaluation as failed due to incompatible input shapes: {all_input_shapes}.")
+                        inputs_ready = False # Trigger failure path below
+                        combined_input_data = None # Ensure no combined data is used
+                        node_outputs[node.unique_id] = None # Mark output cache as None
+                        node.output_tensor = None
+                        if node == self.output_node: final_output_value = None
+                        continue # Skip to next node
+                    # --- End Combine Multiple Inputs ---
+
+                # --- Check if combination succeeded (redundant if fallback is removed, but safe) ---
+                if combined_input_data is None and inputs_ready: # Should not happen if logic above is correct
+                    print(f"Internal Error: Node {node.name} - Combined input is None despite inputs being ready.")
+                    node_outputs[node.unique_id] = None
+                    node.output_tensor = None
+                    if node == self.output_node: final_output_value = None
+                    continue
+
+
+                # --- Step 3: Apply the Node's Core Operation ---
+                current_node_output: Optional[torch.Tensor] = None
+                core_func = node.op_info.get('core_func')
+                op_name = node.op_info.get('name', f'Op_{node.op_id}')
+
+                if core_func:
+                    try:
+                        current_node_output = core_func(combined_input_data, node)
+
+                        if current_node_output is not None:
+                            if not isinstance(current_node_output, torch.Tensor):
+                                print(f"Error: Core func {op_name} for node {node.name} did not return a Tensor (returned {type(current_node_output)}). Output set to None.")
+                                current_node_output = None
+                            elif torch.isnan(current_node_output).any() or torch.isinf(current_node_output).any():
+                                print(f"Warning: Output from {op_name} (Node {node.name}) contains NaN/Inf. Clamping.")
+                                current_node_output = torch.nan_to_num(current_node_output, nan=0.0, posinf=1e6, neginf=-1e6)
+                            elif current_node_output.device != self.device:
+                                current_node_output = current_node_output.to(self.device)
+
+                            if current_node_output is not None:
+                                node.output_shape = tuple(current_node_output.shape)
+
+                    except Exception as e:
+                        print(f"Error evaluating core function {op_name} for node {node.name} (ID:{node.unique_id}): {str(e)}")
+                        current_node_output = None
+
+                elif node.op_id != -1 :
+                    print(f"Error: Core function not defined for op_id {node.op_id} (Name: {op_name}) node {node.name}. Output set to None.")
+                    current_node_output = None
+
+                # --- Step 4: Store the Result ---
+                node_outputs[node.unique_id] = current_node_output
+                node.output_tensor = current_node_output
+
+                if node == self.output_node:
+                    final_output_value = current_node_output
+
+            # --- End Node Loop ---
+
+        # --- Handle Errors During Execution ---
+        except RuntimeError as e:
+            print(f"Error during forward pass execution (likely graph structure error from topo sort): {e}")
+            return None
         except Exception as e:
-            print(f"Error assigning input tensor: {e}")
+            print(f"Unexpected error during forward pass execution loop: {e}")
             traceback.print_exc()
             return None
-        # --- End Assign Input ---
 
-
-        sorted_nodes = self.topological_sort()
-        final_output = None # This will be the output of the designated self.output_node
-
-        for node in sorted_nodes:
-            if node == self.input_node:
-                continue # Already assigned
-
-            # Collect inputs (ensure they are available)
-            node_inputs = []
-            inputs_ready = True
-            if not node.inputs:
-                 # Nodes other than input must have inputs to be evaluated
-                 # (Unless it's a constant node, which we don't have explicitly)
-                 if node != self.input_node:
-                      # print(f"Warning: Node {node.name} has no inputs.") # Optional warning
-                      inputs_ready = False # Cannot evaluate without inputs
+        # --- Final Output Check ---
+        if final_output_value is None:
+            if self.output_node is not None:
+                if self.output_node.unique_id not in node_outputs:
+                    print(f"Warning: Final output is None. Designated output node ({self.output_node.name}, id={self.output_node.unique_id}) was not reached/evaluated.")
+                elif node_outputs.get(self.output_node.unique_id) is None:
+                    print(f"Warning: Final output is None because the designated output node ({self.output_node.name}) evaluation failed or its inputs were invalid.")
             else:
-                 # Sort inputs by unique_id for deterministic order (optional but good practice)
-                 sorted_input_nodes = sorted(node.inputs, key=lambda n: n.unique_id)
-                 for inp_node in sorted_input_nodes:
-                      if inp_node.output is None:
-                           # This can happen if an input node failed to compute its output
-                           print(f"Error: Input {inp_node.name} ({inp_node.unique_id}) for node {node.name} ({node.unique_id}) is None.")
-                           inputs_ready = False
-                           break
-                      node_inputs.append(inp_node.output)
+                print("Warning: Final output is None and no output node was set for the graph.")
 
-            if not inputs_ready:
-                 # print(f"Skipping node {node.name} due to missing inputs.") # Debugging
-                 node.output = None # Mark as failed
-                 continue
-
-            # Apply operation (using the _apply_operation helper from the env)
-            if node.op_id in operations:
-                try:
-                    op_info = operations[node.op_id]
-                    apply_func = op_info['apply']
-                    core_func = op_info['core']
-                    is_elementwise = op_info.get('elementwise', True)
-
-                    # Ensure learnable params are float32
-                    node.learnable_params['W'] = node.learnable_params['W'].astype(np.float32)
-                    node.learnable_params['b'] = node.learnable_params['b'].astype(np.float32)
-
-                    op_params = {
-                        'inputs': node_inputs, # List of np.ndarrays
-                        'learnable_params': node.learnable_params,
-                        **node.parameters
-                    }
-
-                    node.output = apply_func(node_inputs, core_func, op_params, is_elementwise)
-
-                    if node.output is not None:
-                        node.output_shape = node.output.shape
-                        # Ensure output is float32
-                        if node.output.dtype != np.float32:
-                            # print(f"Warning: Node {node.name} output dtype was {node.output.dtype}, converting to float32.")
-                            node.output = node.output.astype(np.float32)
-                    # else:
-                    #      print(f"Warning: Node {node.name} op {node.op_id} produced None output.") # Debugging
-
-                except Exception as e:
-                    print(f"Error evaluating node {node.name} ({node.unique_id}) op {node.op_id}: {str(e)}")
-                    traceback.print_exc()
-                    node.output = None # Ensure output is None on error
-            else:
-                 print(f"Warning: Operation ID {node.op_id} not found in operations implementation for node {node.name}.")
-                 node.output = None
+        return final_output_value
 
 
-            # Check if this is the designated output node
-            if node == self.output_node:
-                final_output = node.output
-                # print(f"Output node {node.name} evaluated. Output shape: {node.output_shape}") # Debugging
-
-        # Return the raw output of the final graph node
-        if final_output is None and self.output_node is not None:
-             # Check if the output node itself failed
-             if self.output_node.output is None:
-                  print(f"Warning: Final output is None because the designated output node ({self.output_node.name}) failed evaluation.")
-             else:
-                  # This case should ideally not happen if topological sort is correct
-                  print(f"Warning: Final output is None, but output node ({self.output_node.name}) was designated and evaluated (output shape: {self.output_node.output_shape}). Check logic.")
-        # elif final_output is not None:
-        #      print(f"Forward pass completed. Final output shape: {final_output.shape}") # Debugging
-
-        return final_output
-
-    # --- Graph Serialization ---
-    def serialize_graph(self) -> List[Dict]:
-        """
-        Serializes the current graph structure into a list of dictionaries.
-        Each dictionary represents a node and its connections.
-        """
-        serialized_nodes = []
+    def get_parameters(self) -> List[nn.Parameter]:
+        """Collects all learnable parameters from all nodes in the graph."""
+        all_params = []
         for node in self.nodes:
+            # Ensure the parameter actually exists and is a nn.Parameter
+            if node.learnable_param is not None and isinstance(node.learnable_param, nn.Parameter):
+                 all_params.append(node.learnable_param)
+        return all_params
+
+    # --- serialize_graph (Unchanged) ---
+    def serialize_graph(self) -> List[Dict]:
+        """Serializes graph structure. Does NOT save learnable parameters."""
+        serialized_nodes = []
+        if not self.nodes: return [] # Handle empty graph
+
+        # Ensure node map is consistent with node list
+        current_node_ids = {n.unique_id for n in self.nodes}
+        valid_nodes = [n for n in self.nodes if n.unique_id in self.nodes_by_id] # Filter just in case
+
+        for node in valid_nodes:
+            # Filter input IDs to only include nodes currently in the graph
+            valid_input_ids = [inp.unique_id for inp in node.inputs if inp.unique_id in current_node_ids]
+
             node_data = {
                 "unique_id": node.unique_id,
-                "op_id": node.op_id, # Use the renumbered ID
-                "name": node.name, # Optional: include name for readability
-                "position": node.position, # Tuple (row, col)
+                "op_id": node.op_id,
+                "name": node.name,
+                "position": node.position,
                 "player_id": node.player_id,
-                "input_ids": [inp.unique_id for inp in node.inputs] # List of IDs of input nodes
+                "input_ids": valid_input_ids, # Use filtered list
+                "learnable_role": node.learnable_role, # Save role
+                "op_info_name": node.op_info.get('name', 'N/A') # Store op name for clarity
             }
             serialized_nodes.append(node_data)
         return serialized_nodes
 
-# --- MathSelfPlayEnv Class ---
+# --- MathSelfPlayEnv Class (Updated Ops) ---
 class MathSelfPlayEnv(gym.Env):
     """
-    Gym environment for self-play graph construction for sequence-to-sequence tasks.
-    Players take turns placing learnable math nodes on a grid.
-    Reward is based on sequence loss (MSE) and expansion penalty.
-    Implements layered connection logic: nodes connect to all nodes in the row above,
-    and retroactively connect to nodes in the row below.
+    Gym environment for self-play graph construction using PyTorch backend.
+    Includes expanded set of operations based on README, adapted for f(x, y_learnable).
     """
     metadata = {'render_modes': ['human'], 'render_fps': 4}
 
-    # --- Reward Weights ---
-    ACCURACY_PENALTY_WEIGHT = 2.0 # Adjusted weight for MSE loss
-    EXPANSION_PENALTY = 0.01      # Penalty for increasing grid dimensions
-    INVALID_MOVE_PENALTY = -1.0   # Penalty for placing on occupied cell, off-grid, or creating cycle
-    EVAL_FAILURE_PENALTY = -0.7   # Penalty if graph forward pass fails or returns None
-    SHAPE_MISMATCH_PENALTY = -0.5 # Penalty if output shape doesn't match target
-    NAN_INF_LOSS_PENALTY = -1.0   # Penalty if loss calculation results in NaN/Inf
-    LOSS_CALC_ERROR_PENALTY = -0.8 # Penalty for other errors during loss calculation
-    UNEXPECTED_STEP_ERROR_PENALTY = -2.0 # Penalty for unexpected errors in step()
+    # (Reward weights remain the same)
+    ACCURACY_REWARD_WEIGHT = 1.0
+    LOSS_PENALTY_WEIGHT = 0.5 # Penalize large losses
+    EXPANSION_PENALTY = 0.01
+    INVALID_MOVE_PENALTY = -1.0 # Penalty for illegal placement/cycle
+    EVAL_FAILURE_PENALTY = -0.8 # Increased penalty for None/NaN/Inf output/loss
+    SHAPE_MISMATCH_PENALTY = -0.6
+    # NAN_INF_LOSS_PENALTY = -1.0 # Covered by EVAL_FAILURE_PENALTY
+    LOSS_CALC_ERROR_PENALTY = -0.8
+    UNEXPECTED_STEP_ERROR_PENALTY = -2.0
+    IMPROVEMENT_BONUS_WEIGHT = 2.0
+    NODE_EXISTENCE_REWARD = 0.01 # Small bonus for successfully adding a node
 
-    # --- MODIFIED __init__ SIGNATURE ---
     def __init__(self,
-                 grid_size=10,       # Default max grid size
-                 max_steps=50,       # Default max steps per episode
-                 feature_dim=8,      # Default feature dim for sequences
+                 grid_size=10,
+                 max_steps=50,
+                 feature_dim=8,
                  batch_size=64,
-                 sequence_length=15, # Added sequence_length back
-                 task='addition'):   # Added task parameter ('addition' or 'reverse')
+                 sequence_length=15,
+                 task='addition',
+                 device: Optional[torch.device] = None): # Allow specifying device
         super().__init__()
 
-        # --- Use the provided or default values ---
         self.grid_size = grid_size
         self.max_steps = max_steps
-        # --- End Use ---
-
-        self.max_nodes = self.grid_size * self.grid_size
         self.feature_dim = feature_dim
         self.batch_size = batch_size
-        self.sequence_length = sequence_length # Store sequence length
-        self.task = task # Store the task type
+        self.sequence_length = sequence_length
+        self.task = task
 
-        # --- Add back char_to_point for sequence generation ---
-        self.char_to_point: Optional[Dict[str, np.ndarray]] = None
-        self.PAD_CHAR = ' ' # Define padding character consistently
-        self.UNK_CHAR = '<UNK>' # Define unknown character consistently
-        # --- End Add back ---
+        # --- Setup Device ---
+        if device is None:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            self.device = device
+        print(f"Environment using device: {self.device}")
 
-        # --- Define Operations ---
-        # ... (Operation definition code remains the same) ...
-        _original_ops = {
-            0: "Addition", 1: "Subtraction", 2: "Multiplication", 3: "Division",
-            4: "Exponentiation", 5: "Root Extraction", 6: "Derivative", 7: "Integral",
-            8: "Fourier Transform", 9: "Inverse Fourier Transform", 10: "Laplace Transform",
-            11: "Inverse Laplace Transform", 12: "Z-Transform", 13: "Inverse Z-Transform",
-            14: "Convolution", 15: "Set Union", 16: "Set Intersection", 17: "Set Complement",
-            18: "Cartesian Product", 19: "Logical AND", 20: "Logical OR", 21: "Logical NOT",
-            22: "Quantifiers", 23: "Function Composition", 24: "Vector Addition",
-            25: "Scalar Multiplication", 26: "Inner Product", 27: "Matrix Multiplication",
-            28: "GCD", 29: "Modulo", 30: "Factorial", 31: "Binomial Coefficient",
-            32: "Closure", 33: "Supremum", 34: "Infimum", 35: "Measure",
-            36: "Distance", 37: "Rotation", 38: "Reflection", 39: "Translation",
-            40: "Entropy"
+        # --- Character Mapping (using PyTorch tensors) ---
+        self.char_to_point: Optional[Dict[str, torch.Tensor]] = None
+        self.PAD_CHAR = ' '
+        self.UNK_CHAR = '<UNK>'
+        self._initialize_char_to_point() # Create mapping
+
+        # --- Define Operations (Expanded Set based on README) ---
+        # ID: (Name, Arity, Core Function Name, Optional: {'learnable_param_role': 'bias'/'scale'/etc for unary})
+        _potential_ops = {
+            # --- Arithmetic (Binary, y=(F,F), use diag(y)) ---
+            0: ("Add", 2, "add_core"),
+            1: ("Sub", 2, "sub_core"),
+            2: ("Mul", 2, "mul_core"),          # Elementwise Product
+            3: ("Div", 2, "div_core"),
+            # --- Algebra (Binary, y=(F,F), use diag(y)) ---
+            4: ("Pow", 2, "pow_core"),          # x ^ diag(y)
+            5: ("Root", 2, "root_core"),        # x ^ (1 / diag(y))
+            # --- Linear Algebra (Binary, y=(F,F)) ---
+            6: ("MatMul", 2, "matmul_core"),    # x @ y
+            7: ("InnerProd", 2, "inner_prod_core"), # sum(x * diag(y), dim=-1) -> changes shape!
+            # --- Number Theory (Binary, y=(F,F), use diag(y)) ---
+            8: ("Mod", 2, "mod_core"),          # x % diag(y)
+            # --- Transforms (Unary) ---
+            9: ("FFT_Mag", 1, "fft_mag_core"),  # abs(fft(x))
+            10: ("IFFT_Plc", 1, "ifft_core"),   # Placeholder/Identity
+            # --- Functional Analysis (Binary) ---
+            11: ("Conv1D", 2, "conv1d_core"),   # y reshaped to kernel
+            # --- Activations (Unary, no learnable param) ---
+            12: ("Tanh", 1, "tanh_core"),
+            13: ("ReLU", 1, "relu_core"),
+            14: ("Sigmoid", 1, "sigmoid_core"),
+            15: ("Log", 1, "log_core"),         # Natural Log
+            # --- Normalization (Unary) ---
+            16: ("LayerNorm", 1, "layernorm_core", {'learnable_param_role': 'bias'}), # Has learnable bias
+            # --- Order/Analysis (Unary, no learnable param) ---
+            17: ("Supremum", 1, "supremum_core"), # Max reduction over sequence
+            18: ("Infimum", 1, "infimum_core"),   # Min reduction over sequence
+            19: ("Mean", 1, "mean_core"),       # Mean reduction over sequence
+            # --- Geometry (Unary, with learnable param) ---
+            20: ("Translate", 1, "translate_core", {'learnable_param_role': 'bias'}), # x + y_bias
+            21: ("Scale", 1, "scale_core", {'learnable_param_role': 'scale'}),    # x * y_scale
         }
-        _ids_to_remove = {10, 11, 12, 13, 18, 22, 23, 32} # Remove less common/complex ops
-        self.operation_types = {}
+
+        self.operation_types = {} # map new_id -> name
+        self.operations_impl = {} # map new_id -> full op_info dict
         _new_id_counter = 0
-        self._original_to_new_id_map = {}
-        for old_id, name in _original_ops.items():
-            if old_id not in _ids_to_remove:
-                self.operation_types[_new_id_counter] = name
-                self._original_to_new_id_map[old_id] = _new_id_counter
-                _new_id_counter += 1
+
+        # Sort by original key for consistent ID assignment if needed later
+        for _, op_data in sorted(_potential_ops.items()):
+            name, arity, core_func_name, *opts = op_data
+            options_dict = opts[0] if opts else {}
+
+            core_func = getattr(self, core_func_name, None)
+            if core_func is None:
+                 print(f"Warning: Core function '{core_func_name}' not found for op '{name}'. Skipping.")
+                 continue
+
+            new_id = _new_id_counter
+            self.operation_types[new_id] = name
+
+            op_info = {
+                'name': name,
+                'arity': arity,
+                'core_func': core_func,
+                **options_dict # Add options like 'learnable_param_role'
+            }
+            self.operations_impl[new_id] = op_info
+            _new_id_counter += 1
+
         self.num_operations = len(self.operation_types)
-
-        self.operations_impl = {}
-        for op_id, name in self.operation_types.items():
-             method_name = name.lower().replace(" ", "_").replace("-","_")
-             core_func = getattr(self, method_name + "_core", self._placeholder_op_core)
-             # Determine if operation works elementwise or on the whole sequence
-             is_elementwise = not (name in ["Derivative", "Integral", "Fourier Transform",
-                                            "Inverse Fourier Transform", "Convolution", "Entropy",
-                                            "Measure", "Supremum", "Infimum"])
-             self.operations_impl[op_id] = {
-                 'core': core_func, 'apply': self._apply_operation,
-                 'elementwise': is_elementwise, 'name': name
-             }
-        # Alias Vector Addition to use the same core as Addition
-        vector_add_new_id = self._original_to_new_id_map.get(24)
-        add_new_id = self._original_to_new_id_map.get(0)
-        if vector_add_new_id is not None and add_new_id is not None:
-             self.operations_impl[vector_add_new_id]['core'] = self.addition_core
+        if self.num_operations == 0:
+             raise ValueError("No valid operations were defined!")
+        print(f"Initialized {self.num_operations} PyTorch operations:")
+        # Print ops grouped by arity/type for readability
+        for arity_target in [2, 1, 0]:
+             print(f"--- Arity {arity_target} ---")
+             ops_arity = {op_id: info for op_id, info in self.operations_impl.items() if info['arity'] == arity_target}
+             for op_id, op_info in sorted(ops_arity.items()):
+                 role = op_info.get('learnable_param_role', 'N/A')
+                 print(f"  ID {op_id}: {op_info['name']} (Role: {role})")
 
 
-        # --- Action Space ---
-        self.num_placement_strategies = 5 # 0: Below Input, 1: Up, 2: Right, 3: Down, 4: Left (relative to pointer)
+        # --- Action Space (Remains NumPy based) ---
+        self.num_placement_strategies = 5 # 0:RelInput, 1:Up, 2:Right, 3:Down, 4:Left
         self.action_space = spaces.Dict({
             'operation_id': spaces.Discrete(self.num_operations),
             'placement_strategy': spaces.Discrete(self.num_placement_strategies)
         })
 
-        # --- Observation Space ---
+        # --- Observation Space (Remains NumPy based) ---
         op_channels = self.num_operations
         input_channel = 1
         player1_channel = 1
@@ -495,479 +771,456 @@ class MathSelfPlayEnv(gym.Env):
             'current_player': spaces.Discrete(2, start=1),
             'steps_taken': spaces.Discrete(self.max_steps + 1)
         })
+        print(f"Observation space board shape: {(self.grid_size, self.grid_size, total_channels)}")
 
-        # Internal state variables
+
+        # --- Internal State ---
         self.graph: Optional[ComputationalGraph] = None
         self.current_player: int = 1
         self.pointer_location: Optional[Tuple[int, int]] = None
-        self.last_loss: float = float('inf') # Use infinity for initial loss
+        self.last_loss: float = float('inf')
         self.steps_taken: int = 0
-        self.current_inputs: Optional[np.ndarray] = None # Shape: (batch, seq_len, feature_dim)
-        self.target_outputs: Optional[np.ndarray] = None # Shape: (batch, seq_len, feature_dim)
+        self.current_inputs: Optional[torch.Tensor] = None
+        self.target_outputs: Optional[torch.Tensor] = None
 
-        # Initialize char_to_point mapping based on the task
-        self._initialize_char_to_point()
+        # --- Loss Function ---
+        self.loss_fn = nn.MSELoss()
 
+
+    # --- _initialize_char_to_point, _generate_sequence_data (unchanged) ---
     def _initialize_char_to_point(self):
-        """Initializes the character-to-vector mapping based on the task."""
+        """Initializes the character-to-vector mapping using PyTorch tensors."""
         self.char_to_point = {}
-        rng = self.np_random if hasattr(self, 'np_random') else np.random.default_rng()
-
         if self.task == 'addition':
             chars = string.digits + '+'
         elif self.task == 'reverse':
-            chars = string.ascii_lowercase + string.digits + " " # Use space for this task too
+            chars = string.ascii_lowercase + string.digits + " "
         else:
             raise ValueError(f"Unknown task: {self.task}")
 
-        all_chars_for_map = set(list(chars))
-        all_chars_for_map.add(self.PAD_CHAR)
-        all_chars_for_map.add(self.UNK_CHAR)
+        all_chars_for_map = set(list(chars)) | {self.PAD_CHAR, self.UNK_CHAR}
+        self.feature_dim = max(self.feature_dim, 1) # Ensure feature dim is at least 1
 
-        for char in all_chars_for_map:
-            if char == self.PAD_CHAR or char == self.UNK_CHAR:
-                point = np.zeros(self.feature_dim, dtype=np.float32)
+        for char in sorted(list(all_chars_for_map)):
+            if char == self.PAD_CHAR:
+                point = torch.zeros(self.feature_dim, device=self.device, dtype=torch.float32)
             else:
-                point = rng.uniform(-1, 1, size=self.feature_dim).astype(np.float32)
+                point = torch.randn(self.feature_dim, device=self.device, dtype=torch.float32) * 0.5
             self.char_to_point[char] = point
-        print(f"Initialized char_to_point for task '{self.task}' with {len(self.char_to_point)} characters.")
+        print(f"Initialized char_to_point (Torch) for task '{self.task}' with {len(self.char_to_point)} chars (dim={self.feature_dim}) on {self.device}.")
 
 
-    def _generate_addition_data(self):
-        """Generate sequence data for addition task."""
-        if self.char_to_point is None:
-            self._initialize_char_to_point() # Should already be called by __init__
+    def _generate_sequence_data(self):
+        """Generates a batch of sequence data as PyTorch tensors."""
+        if self.char_to_point is None: self._initialize_char_to_point()
 
-        digits = string.digits  # '0' to '9'
-        # Adjust max_num calculation to prevent overly long input strings before padding
-        max_digits_per_num = (self.sequence_length - 1) // 2 # -1 for '+' sign
-        max_num = 10 ** max_digits_per_num - 1
-        if max_num <= 0:
-             raise ValueError(f"Sequence length {self.sequence_length} too short for addition task.")
+        input_sequences = []
+        target_sequences = []
+        max_len = self.sequence_length
 
-        # Initialize input and target tensors
-        self.current_inputs = np.zeros((self.batch_size, self.sequence_length, self.feature_dim), dtype=np.float32)
-        self.target_outputs = np.zeros_like(self.current_inputs)
+        # Ensure UNK and PAD vectors exist
+        unk_vector = self.char_to_point.get(self.UNK_CHAR)
+        if unk_vector is None:
+             unk_vector = torch.randn(self.feature_dim, device=self.device, dtype=torch.float32) * 0.1
+             self.char_to_point[self.UNK_CHAR] = unk_vector
+             print(f"Warning: UNK char vector created on the fly.")
+        pad_vector = self.char_to_point.get(self.PAD_CHAR, torch.zeros(self.feature_dim, device=self.device))
 
-        # Get the vector for unknown characters once
-        unk_vector = self.char_to_point.get(self.UNK_CHAR, np.zeros(self.feature_dim, dtype=np.float32))
+        for _ in range(self.batch_size):
+            if self.task == 'addition':
+                max_digits = max(1, (max_len - 1) // 2)
+                num_limit = 10**max_digits
+                num1 = random.randrange(num_limit) # Use randrange to include 0
+                num2 = random.randrange(num_limit)
+                q = f"{num1}+{num2}"
+                try:
+                    a = str(num1 + num2)
+                except OverflowError: # Handle potential large numbers if max_digits is huge
+                    a = "Error" # Or some indicator
+            elif self.task == 'reverse':
+                chars = string.ascii_lowercase + string.digits + " "
+                length = random.randint(1, max_len)
+                q = "".join(random.choice(chars) for _ in range(length))
+                a = q[::-1]
+            else:
+                 raise ValueError(f"Unknown task: {self.task}")
 
-        for i in range(self.batch_size):
-            try:
-                # Generate two random numbers
-                num1 = self.np_random.integers(0, max_num + 1) # Use max_num+1 for inclusive range
-                num2 = self.np_random.integers(0, max_num + 1)
+            # Pad/truncate sequences
+            q_padded = q.ljust(max_len, self.PAD_CHAR)[:max_len]
+            a_padded = a.ljust(max_len, self.PAD_CHAR)[:max_len]
+            input_sequences.append(q_padded)
+            target_sequences.append(a_padded)
 
-                # Convert numbers to strings
-                num1_str = str(num1)
-                num2_str = str(num2)
+        # Convert to tensors
+        batch_input_tensors = []
+        batch_target_tensors = []
 
-                # Create input sequence (num1 + num2)
-                input_seq_unpadded = num1_str + '+' + num2_str
-                if len(input_seq_unpadded) > self.sequence_length:
-                    # This should not happen with the corrected max_num, but as a safeguard:
-                    print(f"Warning: Generated input sequence '{input_seq_unpadded}' longer than sequence length {self.sequence_length}. Truncating.")
-                    input_seq_unpadded = input_seq_unpadded[:self.sequence_length]
+        for q_seq, a_seq in zip(input_sequences, target_sequences):
+            # Use .get with fallback to unk_vector for robustness
+            q_tensor = torch.stack([self.char_to_point.get(c, unk_vector) for c in q_seq], dim=0)
+            a_tensor = torch.stack([self.char_to_point.get(c, unk_vector) for c in a_seq], dim=0)
+            batch_input_tensors.append(q_tensor)
+            batch_target_tensors.append(a_tensor)
 
-                # Pad with the single padding character
-                input_seq = input_seq_unpadded.ljust(self.sequence_length, self.PAD_CHAR)
+        # Stack into batch tensors
+        try:
+            self.current_inputs = torch.stack(batch_input_tensors, dim=0).to(self.device) # (B, S, F)
+            self.target_outputs = torch.stack(batch_target_tensors, dim=0).to(self.device) # (B, S, F)
+        except Exception as e:
+             print(f"Error stacking tensors. Check sequence lengths and feature dims. Error: {e}")
+             # Handle error: Maybe reset or raise? For now, print shapes.
+             print("Input shapes:", [t.shape for t in batch_input_tensors])
+             print("Target shapes:", [t.shape for t in batch_target_tensors])
+             raise RuntimeError("Failed to create batch tensors.") from e
 
-                # Create target sequence (sum)
-                target_sum = num1 + num2
-                target_seq_unpadded = str(target_sum)
-                if len(target_seq_unpadded) > self.sequence_length:
-                     # The sum might exceed the sequence length
-                     print(f"Warning: Generated target sequence '{target_seq_unpadded}' longer than sequence length {self.sequence_length}. Truncating.")
-                     target_seq_unpadded = target_seq_unpadded[:self.sequence_length]
+        # print(f"Generated data: Input shape {self.current_inputs.shape}, Target shape {self.target_outputs.shape} on {self.current_inputs.device}")
 
-                # Pad with the single padding character
-                target_seq = target_seq_unpadded.ljust(self.sequence_length, self.PAD_CHAR)
-
-                # Populate tensors using char_to_point mapping
-                for j in range(self.sequence_length):
-                    input_char = input_seq[j]
-                    target_char = target_seq[j]
-                    # Use .get() with fallback to UNK vector
-                    self.current_inputs[i, j] = self.char_to_point.get(input_char, unk_vector)
-                    self.target_outputs[i, j] = self.char_to_point.get(target_char, unk_vector)
-
-            except Exception as e:
-                 print(f"Error generating data for batch item {i}: {e}")
-                 traceback.print_exc()
-                 # Fill with padding/zeros to avoid downstream errors
-                 self.current_inputs[i, :, :] = self.char_to_point.get(self.PAD_CHAR, unk_vector)
-                 self.target_outputs[i, :, :] = self.char_to_point.get(self.PAD_CHAR, unk_vector)
-
-
-    def _generate_char_sequence_data(self):
-        """Generate character sequence data mapped to feature_dim vectors (reverse task)."""
-        if self.char_to_point is None:
-            self._initialize_char_to_point() # Should already be called by __init__
-
-        # Use the characters defined during initialization for this task
-        chars_for_task = string.ascii_lowercase + string.digits + " "
-        char_list = list(chars_for_task) # Convert to list for choice
-
-        # Initialize input and target tensors
-        self.current_inputs = np.zeros((self.batch_size, self.sequence_length, self.feature_dim), dtype=np.float32)
-        self.target_outputs = np.zeros_like(self.current_inputs)
-
-        # Get the vector for unknown characters once
-        unk_vector = self.char_to_point.get(self.UNK_CHAR, np.zeros(self.feature_dim, dtype=np.float32))
-        pad_vector = self.char_to_point.get(self.PAD_CHAR, unk_vector) # Use UNK if PAD somehow missing
-
-        rng = self.np_random if hasattr(self, 'np_random') else np.random.default_rng()
-
-        for i in range(self.batch_size):
-            try:
-                # Generate random phrases for the batch
-                length = rng.integers(self.sequence_length // 2, self.sequence_length + 1)
-                phrase = ''.join(rng.choice(char_list, size=length))
-
-                # Simple target: reversed sequence
-                target_phrase = phrase[::-1]
-
-                # Populate tensors
-                for j in range(self.sequence_length):
-                    # Input sequence (pad with PAD_CHAR)
-                    char_in = phrase[j] if j < len(phrase) else self.PAD_CHAR
-                    self.current_inputs[i, j] = self.char_to_point.get(char_in, unk_vector)
-                    # Target sequence (pad with PAD_CHAR)
-                    char_out = target_phrase[j] if j < len(target_phrase) else self.PAD_CHAR
-                    self.target_outputs[i, j] = self.char_to_point.get(char_out, unk_vector)
-
-            except Exception as e:
-                 print(f"Error generating data for batch item {i}: {e}")
-                 traceback.print_exc()
-                 # Fill with padding/zeros
-                 self.current_inputs[i, :, :] = pad_vector
-                 self.target_outputs[i, :, :] = pad_vector
-
-
+    # --- reset (unchanged) ---
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        if seed is not None:
+             random.seed(seed)
+             np.random.seed(seed)
+             torch.manual_seed(seed)
+             if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
+             print(f"Environment reset with seed: {seed}")
+        else:
+             print("Environment reset without seed.")
 
-        self.graph = ComputationalGraph()
+        self.graph = ComputationalGraph(device=self.device)
         self.current_player = 1
         self.pointer_location = None
-        self.last_loss = 10.0 # Initial high loss guess (MSE can be large)
+        self.last_loss = float('inf') # Reset loss to infinity
         self.steps_taken = 0
 
-        # --- Generate sequence data based on the task ---
-        if self.task == 'addition':
-            self._generate_addition_data()
-        elif self.task == 'reverse':
-            self._generate_char_sequence_data()
-        else:
-            raise ValueError(f"Unknown task type '{self.task}' for data generation.")
+        try:
+            self._generate_sequence_data()
+        except Exception as e:
+             print(f"CRITICAL ERROR during data generation in reset: {e}")
+             # Cannot proceed without data, raise error
+             raise RuntimeError("Failed to generate data during reset.") from e
 
-        # Ensure data was generated
+
         if self.current_inputs is None or self.target_outputs is None:
-             raise RuntimeError(f"Data generation failed for task '{self.task}'. Check sequence_length and batch_size.")
+             raise RuntimeError("Data generation failed silently.")
 
         observation = self._get_observation()
         info = self._get_info()
 
         return observation, info
 
+    # --- step (Logic mostly unchanged, but handles evaluation results better) ---
     def step(self, action: Dict[str, int]):
-        """Take a turn in the game by placing a node."""
-        if self.graph is None:
-            raise RuntimeError("Environment needs to be reset before stepping.")
-        if self.current_inputs is None or self.target_outputs is None:
-             raise RuntimeError("Environment data (current_inputs/target_outputs) not initialized. Call reset first.")
+        """Take a turn: place node, connect, evaluate, calculate reward."""
+        if self.graph is None: raise RuntimeError("Must reset environment first.")
+        if self.current_inputs is None or self.target_outputs is None: raise RuntimeError("Data not initialized.")
 
-        operation_id = action['operation_id']
-        placement_strategy = action['placement_strategy']
+        # --- Action Validation & Node Creation ---
+        try:
+            operation_id = int(action['operation_id'])
+            placement_strategy = int(action['placement_strategy'])
 
-        terminated = False
-        truncated = False # Initialize truncated flag
+            if not (0 <= operation_id < self.num_operations):
+                 raise ValueError(f"Invalid operation_id: {operation_id} (Num ops: {self.num_operations})")
+            if not (0 <= placement_strategy < self.num_placement_strategies):
+                 raise ValueError(f"Invalid placement_strategy: {placement_strategy}")
+
+            op_info = self.operations_impl[operation_id]
+            op_name = op_info.get('name', 'UnknownOp')
+
+        except (KeyError, ValueError, TypeError) as e:
+             reward = self.INVALID_MOVE_PENALTY * 2 # Penalize bad action format severely
+             terminated = False; truncated = False
+             observation = self._get_observation()
+             info = {'error': f'Invalid action format or value: {e}, action={action}', 'termination_reason': None, 'last_loss': self.last_loss}
+             print(f"Step {self.steps_taken}: Invalid action received: {action}. Error: {e}")
+             # Do not advance step/player on invalid action format
+             return observation, reward, terminated, truncated, info
+
+        # --- Initialize Step Variables ---
+        terminated = False; truncated = False
         reward = 0.0
-        info = {'error': '', 'termination_reason': None}
-        new_node = None
-        retro_connections_made = [] # Keep track of (source_id, target_id) for potential reversal
+        info = {'error': '', 'termination_reason': None, 'node_added': False, 'dag_check': 'N/A', 'eval_status': 'N/A'}
+        new_node: Optional[MathNode] = None
+        target_row, target_col = -1, -1 # Initialize target position
 
         previous_pointer_location = self.pointer_location
         prev_max_row = self.graph.max_row
         prev_max_col = self.graph.max_col
+        graph_nodes_before_ids = {n.unique_id for n in self.graph.nodes} # Store IDs for checking revert
 
         try:
             # --- 1. Determine Target Position ---
-            target_row, target_col = -1, -1
-            is_first_move = (len(self.graph.nodes) == 0)
+            is_first_op_move = (len(self.graph.nodes) <= 1) # Is this the first *operation* node?
 
-            if is_first_move:
-                # First move always places the input node at (0, 0)
+            if not self.graph.nodes: # Absolutely first move -> create Input node
                 target_row, target_col = 0, 0
-                input_node = MathNode(
-                    op_id=-1, name=f"Input_0_P{self.current_player}",
-                    feature_dim=self.feature_dim, player_id=self.current_player
-                )
-                self.graph.add_node(input_node, target_row, target_col)
+                input_op_info = {'name': 'Input', 'arity': 0, 'core_func': None}
+                input_node_obj = MathNode(op_id=-1, name="Input_0", op_info=input_op_info,
+                                         feature_dim=self.feature_dim, player_id=self.current_player, device=self.device)
+                self.graph.add_node(input_node_obj, target_row, target_col)
                 self.pointer_location = (target_row, target_col)
-                previous_pointer_location = self.pointer_location
+                self.graph.set_output_node(input_node_obj) # Initial output is input
+                is_first_op_move = True # Next node placed will be the first op node
 
-                # Determine position for the *first operation* node
-                if placement_strategy == 0: raise ValueError("Placement strategy 0 invalid for first operation node.")
-                elif placement_strategy == 1: target_row, target_col = -1, 0 # Invalid
-                elif placement_strategy == 2: target_row, target_col = 0, 1 # Right
-                elif placement_strategy == 3: target_row, target_col = 1, 0 # Down
-                elif placement_strategy == 4: target_row, target_col = 0, -1 # Invalid
-                else: raise ValueError(f"Unknown placement strategy: {placement_strategy}")
-
-            else: # Not the first move
+            # Now determine position for the actual operation node being placed by the action
+            if is_first_op_move:
+                 # Place relative to input node at (0,0)
+                 input_r, input_c = 0, 0
+                 if placement_strategy == 1: target_row, target_col = input_r - 1, input_c # Up -> Invalid
+                 elif placement_strategy == 2: target_row, target_col = input_r, input_c + 1 # Right
+                 elif placement_strategy == 3: target_row, target_col = input_r + 1, input_c # Down
+                 elif placement_strategy == 4: target_row, target_col = input_r, input_c - 1 # Left -> Invalid
+                 elif placement_strategy == 0: raise ValueError("Placement strategy 0 (RelInput) invalid for first op node.")
+                 else: raise ValueError(f"Unknown placement strategy: {placement_strategy}")
+            else: # Not the first op move, place relative to pointer or input
                 if self.pointer_location is None: raise RuntimeError("Pointer location is None after first move.")
-                pointer_row, pointer_col = self.pointer_location
-
-                if placement_strategy == 1: target_row, target_col = pointer_row - 1, pointer_col # Up
-                elif placement_strategy == 2: target_row, target_col = pointer_row, pointer_col + 1 # Right
-                elif placement_strategy == 3: target_row, target_col = pointer_row + 1, pointer_col # Down
-                elif placement_strategy == 4: target_row, target_col = pointer_row, pointer_col - 1 # Left
-                elif placement_strategy == 0: # Strategy 0: Relative to input node
+                pr, pc = self.pointer_location
+                if placement_strategy == 1: target_row, target_col = pr - 1, pc # Up
+                elif placement_strategy == 2: target_row, target_col = pr, pc + 1 # Right
+                elif placement_strategy == 3: target_row, target_col = pr + 1, pc # Down
+                elif placement_strategy == 4: target_row, target_col = pr, pc - 1 # Left
+                elif placement_strategy == 0: # Relative to input node
                      if self.graph.input_node and self.graph.input_node.position:
-                          input_r, input_c = self.graph.input_node.position
-                          target_row, target_col = input_r + 1, input_c # Try below
-                          if not (0 <= target_row < self.grid_size and 0 <= target_col < self.grid_size) or self.graph.get_node_at(target_row, target_col):
-                               target_row, target_col = input_r, input_c + 1 # Try right
-                          if not (0 <= target_row < self.grid_size and 0 <= target_col < self.grid_size) or self.graph.get_node_at(target_row, target_col):
-                               raise ValueError("Placement strategy 0 failed: Positions relative to input node occupied/off-grid.")
-                     else: raise ValueError("Placement strategy 0 invalid: Input node position unknown.")
+                          ir, ic = self.graph.input_node.position
+                          potential_pos = [(ir, ic + 1), (ir + 1, ic)] # Try R, D
+                          found = False
+                          for r,c in potential_pos:
+                              if (0 <= r < self.grid_size and 0 <= c < self.grid_size) and self.graph.get_node_at(r,c) is None:
+                                   target_row, target_col = r, c; found = True; break
+                          if not found: raise ValueError("Placement 0 failed: R/D spots near input occupied or off-grid.")
+                     else: raise ValueError("Placement 0 failed: input node missing or has no position.")
                 else: raise ValueError(f"Unknown placement strategy: {placement_strategy}")
+
 
             # --- 2. Validate Position ---
             if not (0 <= target_row < self.grid_size and 0 <= target_col < self.grid_size):
-                raise ValueError(f"Invalid move: Position ({target_row},{target_col}) is off-grid.")
-            if self.graph.get_node_at(target_row, target_col) is not None:
-                raise ValueError(f"Invalid move: Position ({target_row},{target_col}) is occupied.")
+                raise ValueError(f"Invalid move: Position ({target_row},{target_col}) off-grid ({self.grid_size}x{self.grid_size}).")
+            existing_node = self.graph.get_node_at(target_row, target_col)
+            if existing_node is not None:
+                raise ValueError(f"Invalid move: Position ({target_row},{target_col}) occupied by {existing_node.name}.")
 
             # --- 3. Create and Add Operation Node ---
-            if not (0 <= operation_id < self.num_operations):
-                 raise ValueError(f"Invalid operation_id: {operation_id}")
-            op_name = self.operations_impl[operation_id]['name']
             node_name = f"{op_name}_{len(self.graph.nodes)}_P{self.current_player}"
             new_node = MathNode(
-                op_id=operation_id, name=node_name,
-                feature_dim=self.feature_dim, player_id=self.current_player
+                op_id=operation_id, name=node_name, op_info=op_info,
+                feature_dim=self.feature_dim, player_id=self.current_player, device=self.device
             )
             self.graph.add_node(new_node, target_row, target_col)
-            # print(f"Debug: Added node {new_node.name} at ({target_row},{target_col})") # Debug
+            info['node_added'] = True
 
-            # --- 4. Connect Node (Layered Logic) ---
-
-            # --- 4a. Forward Connection (From Row Above) ---
-            sources_above = []
+            # --- 4. Connect Node ---
+            # Connect FROM row above
             if target_row > 0:
                 sources_above = self.graph.get_nodes_in_row(target_row - 1)
-                # print(f"Debug: Sources in row {target_row - 1}: {[s.name for s in sources_above]}") # Debug
                 for source_node in sources_above:
                     self.graph.connect_nodes(source_node.unique_id, new_node.unique_id)
-
-            # Special Cases for row 0 and 1 connecting to Input Node
+            # Connect FROM Input node if appropriate
             if self.graph.input_node and new_node != self.graph.input_node:
-                if target_row == 0: # Placed alongside input
-                    # print(f"Debug: Connecting node {new_node.name} at row 0 from Input") # Debug
+                needs_input_connection = (target_row == 0) or \
+                                         (target_row == 1 and len(self.graph.get_nodes_in_row(0)) <= 1) # Row 0 empty or just Input
+                if needs_input_connection:
                     self.graph.connect_nodes(self.graph.input_node.unique_id, new_node.unique_id)
-                elif target_row == 1: # First layer after input
-                    # Ensure connection to input, even if row 0 had other nodes
-                    # connect_nodes handles duplicates, so this is safe
-                    # print(f"Debug: Ensuring node {new_node.name} at row 1 connects from Input") # Debug
-                    self.graph.connect_nodes(self.graph.input_node.unique_id, new_node.unique_id)
-
-            # Check if the node ended up with any inputs (excluding the input node itself)
-            if not new_node.inputs and new_node != self.graph.input_node:
-                 print(f"Warning: Node {new_node.name} at ({target_row},{target_col}) was added with no inputs.")
-
-
-            # --- 4b. Backward (Retroactive) Connection (To Row Below) ---
-            targets_below = []
-            if target_row + 1 <= self.graph.max_row: # Check if a row below exists
-                targets_below = self.graph.get_nodes_in_row(target_row + 1)
-                # print(f"Debug: Targets in row {target_row + 1}: {[t.name for t in targets_below]}") # Debug
+            # Connect TO row below
+            retro_connections_made = []
+            next_row_idx = target_row + 1
+            if next_row_idx <= self.graph.max_row:
+                targets_below = self.graph.get_nodes_in_row(next_row_idx)
                 for target_node in targets_below:
-                    if self.graph.connect_nodes(new_node.unique_id, target_node.unique_id):
-                         # Store which connections were made for potential reversal
-                         retro_connections_made.append((new_node, target_node))
-                         # print(f"Debug: Retroactively connected {new_node.name} -> {target_node.name}") # Debug
+                    if target_node != self.graph.input_node:
+                         if self.graph.connect_nodes(new_node.unique_id, target_node.unique_id):
+                             retro_connections_made.append((new_node, target_node))
 
 
             # --- 5. Update Pointer ---
             self.pointer_location = (target_row, target_col)
 
             # --- 6. Check DAG ---
-            # This check MUST happen after ALL connections (forward and backward) are made
-            if not self.graph.is_valid_dag():
-                # print(f"Debug: Cycle detected after adding {new_node.name} and connections.") # Debug
-                # Revert changes if cycle created
-                # 1. Undo retroactive connections explicitly
-                for source, target in retro_connections_made:
-                    target.remove_input(source) # Use the specific removal method
-                    # print(f"Debug: Reverted retro connection {source.name} -> {target.name}") # Debug
-
-                # 2. Remove the newly added node (this also removes forward connections pointing TO it)
+            is_dag = self.graph.is_valid_dag()
+            info['dag_check'] = is_dag
+            if not is_dag:
+                # Revert: Remove the added node. remove_node should handle connections.
                 self.graph.remove_node(new_node)
-                # print(f"Debug: Removed node {new_node.name} due to cycle.") # Debug
+                self.pointer_location = previous_pointer_location # Restore pointer
+                # Recalculate grid boundaries after removal (done within remove_node now)
+                info['node_added'] = False # Mark removal
+                raise ValueError("Invalid move: Created a cycle.")
 
-                # 3. Restore pointer
-                self.pointer_location = previous_pointer_location
-
-                # 4. Raise error
-                new_node = None # Ensure new_node is None
-                raise ValueError("Invalid move: Created a cycle (potentially via retroactive connections).")
+            # --- Node successfully added ---
+            reward += self.NODE_EXISTENCE_REWARD
 
             # --- 7. Evaluate Graph & Calculate Reward ---
-            # (Evaluation and Reward logic remains the same as previous version)
-            self.graph.set_output_node(new_node) # Evaluate based on the newly added node
+            self.graph.set_output_node(new_node) # Evaluate with the new node as output
+
             current_loss = float('inf')
-            eval_output_np = None
+            eval_output: Optional[torch.Tensor] = None
+            reward_component_accuracy = 0.0
+            reward_component_penalty = 0.0
 
             if self.graph.input_node and self.graph.output_node:
-                 eval_output_np = self.graph.forward_pass(self.current_inputs, self.operations_impl)
+                 inputs_detached = self.current_inputs.detach().clone() # Clone for safety
+                 targets_detached = self.target_outputs.detach().clone()
+
+                 # --- Perform Forward Pass ---
+                 with torch.no_grad():
+                      eval_output = self.graph.forward_pass(inputs_detached)
+
             else:
-                 info['error'] = "Graph evaluation skipped: Missing input or output node."
-                 current_loss = (self.last_loss + 20.0) if np.isfinite(self.last_loss) else 100.0
-                 reward = self.EVAL_FAILURE_PENALTY
+                 info['error'] = "Graph eval skipped: Input/Output node missing or invalid post-add."
+                 info['eval_status'] = 'Skipped'
+                 reward_component_penalty += self.EVAL_FAILURE_PENALTY # Penalize failure to evaluate
 
-            if eval_output_np is not None:
-                CLIP_VALUE = 1e6
-                eval_output_np = np.clip(eval_output_np, -CLIP_VALUE, CLIP_VALUE)
+            # --- Calculate Loss and Reward based on eval_output ---
+            if eval_output is not None:
+                 # Check for NaN/Inf in output tensor itself
+                 if torch.isnan(eval_output).any() or torch.isinf(eval_output).any():
+                      info['error'] = "Evaluation forward pass resulted in NaN/Inf tensor."
+                      info['eval_status'] = 'NaN/Inf Output'
+                      current_loss = float('inf') # Treat as max loss
+                      reward_component_penalty += self.EVAL_FAILURE_PENALTY
+                 # Check shape match BEFORE calculating loss
+                 elif eval_output.shape != targets_detached.shape:
+                      info['error'] = f"Output shape mismatch: Exp {targets_detached.shape}, Got {eval_output.shape}"
+                      info['eval_status'] = 'Shape Mismatch'
+                      current_loss = float('inf') # Treat as max loss
+                      reward_component_penalty += self.SHAPE_MISMATCH_PENALTY
+                 else: # Shapes match, proceed to loss calculation
+                     try:
+                         loss = self.loss_fn(eval_output, targets_detached)
+                         loss_item = loss.item()
 
-                if eval_output_np.shape == self.target_outputs.shape:
-                    try:
-                        diff = eval_output_np - self.target_outputs
-                        loss = np.mean(diff * diff)
+                         if not np.isfinite(loss_item):
+                             current_loss = float('inf') # Treat as max loss
+                             reward_component_penalty += self.EVAL_FAILURE_PENALTY # Use general failure penalty
+                             info['error'] = f"Loss calculation resulted in non-finite value: {loss_item}"
+                             info['eval_status'] = 'NaN/Inf Loss'
+                         else:
+                             current_loss = loss_item
+                             info['eval_status'] = 'Success'
+                             # Calculate improvement reward (handle initial infinite last_loss)
+                             finite_last_loss = self.last_loss if np.isfinite(self.last_loss) else current_loss + 1.0 # Compare against slightly worse
+                             improvement = finite_last_loss - current_loss
+                             # Reward is based on improvement AND scaled negative loss
+                             reward_component_accuracy = (self.IMPROVEMENT_BONUS_WEIGHT * improvement) - \
+                                                         (self.LOSS_PENALTY_WEIGHT * current_loss)
 
-                        if np.isnan(loss) or np.isinf(loss):
-                            current_loss = 100.0
-                            reward = self.NAN_INF_LOSS_PENALTY
-                            info['error'] = "Evaluation resulted in NaN/Inf loss."
-                        else:
-                            current_loss = loss
-                            finite_last_loss = self.last_loss if np.isfinite(self.last_loss) else 100.0
-                            improvement = finite_last_loss - current_loss
-                            accuracy_penalty = self.ACCURACY_PENALTY_WEIGHT * current_loss
-                            reward = improvement - accuracy_penalty
-                    except Exception as loss_calc_e:
-                         current_loss = 100.0
-                         reward = self.LOSS_CALC_ERROR_PENALTY
-                         info['error'] = f"Error during loss calculation: {loss_calc_e}"
-                         traceback.print_exc()
-                else:
-                    current_loss = (self.last_loss + 10.0) if np.isfinite(self.last_loss) else 100.0
-                    reward = self.SHAPE_MISMATCH_PENALTY
-                    info['error'] = f"Output shape mismatch: Expected {self.target_outputs.shape}, Got {eval_output_np.shape}"
-            elif 'error' not in info or not info['error']:
-                current_loss = (self.last_loss + 20.0) if np.isfinite(self.last_loss) else 100.0
-                reward = self.EVAL_FAILURE_PENALTY
-                info['error'] = "Graph evaluation failed or produced None output."
+                     except Exception as loss_calc_e:
+                          current_loss = float('inf') # Treat as max loss
+                          reward_component_penalty += self.LOSS_CALC_ERROR_PENALTY
+                          info['error'] = f"Error during loss calculation: {loss_calc_e}"
+                          info['eval_status'] = 'Loss Error'
+                          # traceback.print_exc()
 
+            elif not info['error']: # Eval failed (forward_pass returned None)
+                 current_loss = float('inf') # Treat as max loss
+                 reward_component_penalty += self.EVAL_FAILURE_PENALTY
+                 info['error'] = "Graph evaluation failed: forward_pass returned None."
+                 info['eval_status'] = 'Forward Pass Failed'
+
+            # Expansion penalty
             expanded_grid = (self.graph.max_row > prev_max_row) or (self.graph.max_col > prev_max_col)
             if expanded_grid:
-                reward -= self.EXPANSION_PENALTY
-                info['grid_expanded'] = True
+                 reward_component_penalty -= self.EXPANSION_PENALTY
+                 # info['grid_expanded'] = True # Less critical info
 
-            self.last_loss = current_loss
-            # --- End Reward Calculation ---
+            # Combine reward components
+            reward += reward_component_accuracy + reward_component_penalty
 
-        except ValueError as e: # Catch specific ValueErrors from validation/placement/cycle
-            reward = self.INVALID_MOVE_PENALTY
-            info['error'] = str(e)
-            # Pointer and node removal are handled inside the DAG check block if cycle occurs
-            # If error was placement/validation, pointer needs restoring here
-            if "cycle" not in str(e): # Only restore pointer if error wasn't cycle (cycle logic handles it)
-                 self.pointer_location = previous_pointer_location
-            # Ensure node is removed if error happened before DAG check
-            if new_node and new_node in self.graph.nodes and "cycle" not in str(e):
-                 self.graph.remove_node(new_node)
+            # Update last_loss only if current evaluation was successful and loss is finite
+            if info['eval_status'] == 'Success' and np.isfinite(current_loss):
+                 self.last_loss = current_loss
+            # --- End Reward Calc ---
 
-        except Exception as e: # Catch unexpected errors during step
+        except ValueError as e: # Catch placement/cycle/validation errors during node add/connect
+            reward = self.INVALID_MOVE_PENALTY # Apply specific penalty
+            info['error'] = f"Invalid Move: {str(e)}"
+            self.pointer_location = previous_pointer_location # Restore pointer
+
+            # Check if the node was added before the error and needs removal
+            current_node_ids = {n.unique_id for n in self.graph.nodes}
+            added_node_id = list(current_node_ids - graph_nodes_before_ids)
+            if added_node_id:
+                 node_to_remove = self.graph.get_node_by_id(added_node_id[0])
+                 if node_to_remove:
+                     # print(f"Attempting to remove node {node_to_remove.name} after error: {e}")
+                     self.graph.remove_node(node_to_remove)
+            info['node_added'] = False # Ensure flag is false
+
+        except Exception as e: # Catch unexpected errors (e.g., in data generation, core funcs)
             reward = self.UNEXPECTED_STEP_ERROR_PENALTY
             info['error'] = f"Unexpected error in step: {str(e)}"
             traceback.print_exc()
-            terminated = True # End episode on unexpected error
+            terminated = True # End episode on unexpected serious error
             info['termination_reason'] = 'unexpected_error'
-            # Attempt to restore state
-            self.pointer_location = previous_pointer_location
-            # Undo potential retroactive connections if error happened after them but before DAG check failed
-            if retro_connections_made:
-                 for source, target in retro_connections_made:
-                      target.remove_input(source)
-            if new_node and new_node in self.graph.nodes:
-                 self.graph.remove_node(new_node)
+            self.pointer_location = previous_pointer_location # Attempt pointer restore
 
-        # --- 8. Update Step Counter and Switch Player ---
+        # --- 8. Update Step Counter & Player ---
         self.steps_taken += 1
-        self.current_player = 3 - self.current_player # Switch between 1 and 2
+        self.current_player = 3 - self.current_player
 
         # --- 9. Check Termination Conditions ---
         if not terminated:
             if self.steps_taken >= self.max_steps:
-                terminated = True
+                truncated = True; terminated = False
                 info['termination_reason'] = 'max_steps_reached'
-            elif len(self.graph.nodes) >= self.max_nodes:
-                 terminated = True
-                 info['termination_reason'] = 'max_nodes_reached'
+            elif len(self.graph.nodes) >= self.grid_size * self.grid_size:
+                 truncated = True
+                 info['termination_reason'] = 'grid_full' # More specific reason
 
-        # --- 10. Prepare return values ---
+        # --- 10. Prepare Return Values ---
         observation = self._get_observation()
         if not np.isfinite(reward):
-             print(f"Warning: Non-finite reward calculated ({reward}). Clamping.")
-             reward = self.UNEXPECTED_STEP_ERROR_PENALTY
-        truncated = (info.get('termination_reason') == 'max_steps_reached')
-        if truncated: terminated = False
-        info['last_loss'] = self.last_loss if np.isfinite(self.last_loss) else 100.0
+            print(f"Warning: Non-finite reward calculated ({reward}). Clamping to {self.UNEXPECTED_STEP_ERROR_PENALTY}.")
+            reward = self.UNEXPECTED_STEP_ERROR_PENALTY
+        # Report current loss state, ensuring it's finite for logging/tracking
+        info['last_loss'] = self.last_loss if np.isfinite(self.last_loss) else 1e6 # Use large finite number if inf
+
+        # Debug Print (optional)
+        # print(f"Step {self.steps_taken} Ret: P{self.current_player} | Rew={reward:.3f} | Loss={info['last_loss']:.3f} | Eval={info['eval_status']} | DAG={info['dag_check']} | Err='{info['error'][:50]}...'")
 
         return observation, reward, terminated, truncated, info
 
-    # --- _get_observation, _get_info, render remain the same ---
+    # --- _get_observation, _get_info (Unchanged) ---
     def _get_observation(self):
-        """Construct the observation dictionary."""
+        """Construct the NumPy observation dictionary for the agent."""
         board_shape = self.observation_space['board'].shape
+        expected_channels = self.num_operations + 4
+        if board_shape[2] != expected_channels:
+            print(f"Warning: Observation shape mismatch. Expected {expected_channels} channels, shape is {board_shape}. Re-creating.")
+            board_shape = (self.grid_size, self.grid_size, expected_channels)
+            # Update the observation space if needed (though technically should be fixed at init)
+            # self.observation_space['board'] = spaces.Box(low=0, high=1, shape=board_shape, dtype=np.float32)
+
         board = np.zeros(board_shape, dtype=np.float32)
 
-        if self.graph is None: # Should not happen after reset
-             print("Warning: _get_observation called with self.graph=None")
-             return {
-                'board': board,
-                'current_player': self.current_player,
-                'steps_taken': self.steps_taken
-             }
+        if self.graph is None: return {'board': board, 'current_player': self.current_player, 'steps_taken': self.steps_taken}
 
-        # Channel indices based on updated observation space definition
-        op_channel_offset = 0 # Channels 0 to num_operations-1
-        input_channel_idx = self.num_operations # Channel for input node marker
-        player1_channel_idx = self.num_operations + 1 # Channel for player 1 nodes
-        player2_channel_idx = self.num_operations + 2 # Channel for player 2 nodes
-        pointer_channel_idx = self.num_operations + 3 # Channel for pointer location
+        op_channel_offset = 0
+        input_channel_idx = self.num_operations
+        player1_channel_idx = self.num_operations + 1
+        player2_channel_idx = self.num_operations + 2
+        pointer_channel_idx = self.num_operations + 3
 
         for node in self.graph.nodes:
-            if node.position is None:
-                 print(f"Warning: Node {node.name} has no position in _get_observation.")
-                 continue # Should not happen for added nodes
+            if node.position is None: continue
             r, c = node.position
             if 0 <= r < self.grid_size and 0 <= c < self.grid_size:
-                # Mark operation type or input node
                 if node.op_id == -1: # Input node
-                    board[r, c, input_channel_idx] = 1.0
-                elif 0 <= node.op_id < self.num_operations: # Check against new range
-                    board[r, c, op_channel_offset + node.op_id] = 1.0
-                # else: # Should not happen if op_id validation is correct
-                #     print(f"Warning: Node {node.name} has invalid op_id {node.op_id} in _get_observation.")
+                    if input_channel_idx < board.shape[2]: board[r, c, input_channel_idx] = 1.0
+                elif 0 <= node.op_id < self.num_operations: # Valid operation
+                    ch_idx = op_channel_offset + node.op_id
+                    if ch_idx < board.shape[2]: board[r, c, ch_idx] = 1.0
 
-
-                # Mark which player placed the node
+                # Player ownership
                 if node.player_id == 1:
-                    board[r, c, player1_channel_idx] = 1.0
+                     if player1_channel_idx < board.shape[2]: board[r, c, player1_channel_idx] = 1.0
                 elif node.player_id == 2:
-                    board[r, c, player2_channel_idx] = 1.0
+                     if player2_channel_idx < board.shape[2]: board[r, c, player2_channel_idx] = 1.0
 
-        # Mark pointer location
         if self.pointer_location:
             pr, pc = self.pointer_location
             if 0 <= pr < self.grid_size and 0 <= pc < self.grid_size:
-                board[pr, pc, pointer_channel_idx] = 1.0
-            # else: # Pointer should always be within grid if placement validation works
-            #     print(f"Warning: Pointer location {self.pointer_location} is outside grid bounds.")
-
+                 if pointer_channel_idx < board.shape[2]: board[pr, pc, pointer_channel_idx] = 1.0
 
         return {
             'board': board,
@@ -976,703 +1229,469 @@ class MathSelfPlayEnv(gym.Env):
         }
 
     def _get_info(self):
-        """Return auxiliary information about the environment state."""
-        finite_loss = self.last_loss if np.isfinite(self.last_loss) else 100.0
+        finite_loss = self.last_loss if np.isfinite(self.last_loss) else 1e6 # Use large finite value
         return {
             'last_loss': finite_loss,
             'nodes_count': len(self.graph.nodes) if self.graph else 0,
             'pointer': self.pointer_location,
             'max_row': self.graph.max_row if self.graph else -1,
             'max_col': self.graph.max_col if self.graph else -1,
+            'num_ops': self.num_operations
         }
 
+    # --- render (Unchanged) ---
     def render(self, mode='human'):
-        """Render the current state of the environment grid."""
-        if mode != 'human' or self.graph is None:
-            return
-
-        print("-" * (self.grid_size * 7)) # Adjusted width
-        print(f"Step: {self.steps_taken}/{self.max_steps}, Player: {self.current_player}'s Turn")
+        if mode != 'human' or self.graph is None: return
+        grid_cell_width = 15 # Keep increased width
+        total_width = self.grid_size * (grid_cell_width + 1) + 1
+        print("\n" + "=" * total_width)
+        print(f"Step: {self.steps_taken}/{self.max_steps}, Player: {self.current_player}'s Turn, Device: {self.device}")
         loss_val = self.last_loss if np.isfinite(self.last_loss) else float('inf')
-        print(f"Last Eval Loss: {loss_val:.4f}")
-        print(f"Pointer Location: {self.pointer_location}")
-        print(f"Nodes: {len(self.graph.nodes)}/{self.max_nodes}")
+        print(f"Last Eval Loss (MSE): {loss_val:.4f}")
+        print(f"Pointer: {self.pointer_location}, Nodes: {len(self.graph.nodes)}/{self.grid_size**2}")
 
-        grid_repr = [['.' for _ in range(self.grid_size)] for _ in range(self.grid_size)]
+        grid_repr = [['.' * (grid_cell_width-1) + ' ' for _ in range(self.grid_size)] for _ in range(self.grid_size)]
         for r in range(self.grid_size):
             for c in range(self.grid_size):
                 node = self.graph.get_node_at(r, c)
+                cell_str = ""
                 if node:
-                    op_char = str(node.op_id) if node.op_id != -1 else 'In' # Display new ID
+                    op_name_short = node.op_info.get('name', 'ERR')[:6] if node.op_id != -1 else 'Input'
                     player_mark = f"P{node.player_id}"
-                    cell_str = f"{op_char}({player_mark})"
-                    if (r, c) == self.pointer_location:
-                        cell_str += "*" # Mark pointer
-                    grid_repr[r][c] = cell_str
+                    learn_info = ""
+                    if node.learnable_param is not None:
+                         p_shape = tuple(node.learnable_param.shape)
+                         role_str = f"R:{node.learnable_role}" if node.learnable_role else "R:?"
+                         shape_str = f"S:{p_shape}"
+                         learn_info = f"({role_str}{shape_str})"
+
+                    cell_str = f"{op_name_short}{player_mark}{learn_info}"
+
+                if (r, c) == self.pointer_location: cell_str += "*"
+                grid_repr[r][c] = f"{cell_str:<{grid_cell_width-1}}"[:grid_cell_width-1] + ' '
 
         print("\nBoard:")
-        header = "  " + " ".join(f"{i:^6}" for i in range(self.grid_size))
+        header = "  " + " ".join(f"{i:^{grid_cell_width}}" for i in range(self.grid_size))
         print(header)
-        print("  " + "-" * (self.grid_size * 7 - 1))
+        print(" " + "=" * total_width)
         for r in range(self.grid_size):
-            print(f"{r}|" + "|".join(f"{cell:^6}" for cell in grid_repr[r]) + "|")
-        print("  " + "-" * (self.grid_size * 7 - 1))
+            print(f"{r}|" + "|".join(f"{cell}" for cell in grid_repr[r]) + "|")
+            print(" " + "-" * total_width)
 
-        # --- Add connection details ---
-        print("\nConnections (Target <- Sources):")
+        print("\nConnections & Node Details (Target <- Sources):")
         sorted_nodes = sorted(self.graph.nodes, key=lambda n: (n.position[0], n.position[1]) if n.position else (999, 999))
         for node in sorted_nodes:
-             if node.inputs:
-                  input_names = sorted([inp.name for inp in node.inputs])
-                  print(f"  {node.name} <- {input_names}")
-             else:
-                  print(f"  {node.name} <- []")
-        # --- End connection details ---
+             input_names = sorted([f"{inp.name}({inp.unique_id % 1000})" for inp in node.inputs])
+             learn_str = ""
+             if node.learnable_param is not None:
+                 p_shape = tuple(node.learnable_param.shape)
+                 learn_str = f", LRole={node.learnable_role}, P={p_shape}"
+             print(f"  {node.name}({node.unique_id % 1000}) @{node.position} (Op:{node.op_id}, Ar:{node.arity}{learn_str}) <- {input_names}")
+        print("=" * total_width + "\n")
 
-        print("-" * (self.grid_size * 7))
 
+    # === Core Operation Functions (PyTorch - Added & Revised) ===
 
-    # --- _apply_operation and _core functions remain the same ---
-    # Note: They now operate on self.feature_dim (e.g., 8)
-    def _apply_operation(self, inputs: List[np.ndarray], operation_func: callable, params: Dict, elementwise: bool = True) -> Optional[np.ndarray]:
-        """
-        Helper method to apply a core operation and the learnable transformation Wx+b.
-        Handles batching, sequence processing, and shape alignment. Ensures float32.
-        """
-        if not inputs:
-            # print("Error (_apply_operation): No inputs provided.") # Debugging
+    # --- Helpers ---
+    def _get_learnable_param_as_vector(self, node: MathNode, op_name: str) -> Optional[torch.Tensor]:
+        """Safely retrieves the learnable param and attempts to return it as a vector (F,)."""
+        if node.learnable_param is None:
+            print(f"Error in {op_name}_core ({node.name}): learnable_param is None.")
             return None
 
-        learnable_params = params.get('learnable_params', {})
-        # W, b dimensions are based on self.feature_dim
-        W = learnable_params.get('W', np.eye(self.feature_dim, dtype=np.float32))
-        b = learnable_params.get('b', np.zeros(self.feature_dim, dtype=np.float32))
+        y_param = node.learnable_param
+        feature_dim = self.feature_dim
 
-        # Ensure W and b are float32
-        W = W.astype(np.float32)
-        b = b.astype(np.float32)
-
-        x = inputs[0]
-        if x is None:
-             print("Error (_apply_operation): Primary input (x) is None.")
-             return None
-        # Ensure x is numpy array and float32
-        if not isinstance(x, np.ndarray):
-             print(f"Error (_apply_operation): Primary input (x) is not a numpy array (type: {type(x)}).")
-             return None
-        if x.dtype != np.float32:
-             # print(f"Warning (_apply_operation): Primary input (x) dtype was {x.dtype}, converting to float32.")
-             x = x.astype(np.float32)
-        if x.ndim != 3:
-             print(f"Error (_apply_operation): Primary input (x) has incorrect dimensions {x.ndim}, expected 3 (batch, seq, feat). Shape: {x.shape}")
-             return None
-
-        batch_size, seq_len, feature_dim_actual = x.shape
-
-        # Input feature dim must match the environment's feature_dim
-        if feature_dim_actual != self.feature_dim:
-             print(f"Error (_apply_operation): Input feature dimension {feature_dim_actual} does not match environment feature dimension {self.feature_dim}.")
-             return None
-
-        y = inputs[1] if len(inputs) > 1 else None
-        if y is not None:
-            if not isinstance(y, np.ndarray):
-                 print(f"Warning (_apply_operation): Secondary input (y) is not a numpy array (type: {type(y)}). Ignoring y.")
-                 y = None
-            else:
-                 if y.dtype != np.float32:
-                      # print(f"Warning (_apply_operation): Secondary input (y) dtype was {y.dtype}, converting to float32.")
-                      y = y.astype(np.float32)
-
-                 if y.shape != x.shape:
-                    # Attempt broadcasting/tiling for y
-                    try:
-                        if y.ndim == 3:
-                            # Case 1: (batch, 1, feat) -> (batch, seq, feat)
-                            if y.shape[0] == batch_size and y.shape[1] == 1 and y.shape[2] == feature_dim_actual:
-                                y = np.tile(y, (1, seq_len, 1))
-                            # Case 2: (1, seq, feat) -> (batch, seq, feat)
-                            elif y.shape[0] == 1 and y.shape[1] == seq_len and y.shape[2] == feature_dim_actual:
-                                y = np.tile(y, (batch_size, 1, 1))
-                            # Case 3: (1, 1, feat) -> (batch, seq, feat)
-                            elif y.shape[0] == 1 and y.shape[1] == 1 and y.shape[2] == feature_dim_actual:
-                                y = np.tile(y, (batch_size, seq_len, 1))
-                            else:
-                                 print(f"Warning (_apply_operation): Secondary input (y) shape {y.shape} incompatible with primary input shape {x.shape} after 3D check. Ignoring y.")
-                                 y = None
-                        elif y.ndim == 2:
-                             # Case 4: (batch, feat) -> (batch, seq, feat)
-                             if y.shape[0] == batch_size and y.shape[1] == feature_dim_actual:
-                                  y = np.expand_dims(y, 1) # (batch, 1, feat)
-                                  y = np.tile(y, (1, seq_len, 1))
-                             # Case 5: (seq, feat) -> (batch, seq, feat) - Less common, maybe treat as error?
-                             elif y.shape[0] == seq_len and y.shape[1] == feature_dim_actual:
-                                  y = np.expand_dims(y, 0) # (1, seq, feat)
-                                  y = np.tile(y, (batch_size, 1, 1))
-                             else:
-                                  print(f"Warning (_apply_operation): Secondary input (y) shape {y.shape} incompatible with primary input shape {x.shape} after 2D check. Ignoring y.")
-                                  y = None
-                        elif y.ndim == 1:
-                             # Case 6: (feat,) -> (batch, seq, feat)
-                             if y.shape[0] == feature_dim_actual:
-                                  y = np.reshape(y, (1, 1, feature_dim_actual))
-                                  y = np.tile(y, (batch_size, seq_len, 1))
-                             else:
-                                  print(f"Warning (_apply_operation): Secondary input (y) shape {y.shape} incompatible with feature dimension {feature_dim_actual}. Ignoring y.")
-                                  y = None
-                        else:
-                             print(f"Warning (_apply_operation): Secondary input (y) has unsupported dimensions {y.ndim}. Ignoring y.")
-                             y = None
-
-                    except Exception as e:
-                         print(f"Warning (_apply_operation): Error during y shape alignment: {e}. Ignoring y.")
-                         y = None
-                 # else: y shape matches x shape, no alignment needed
-
-        # Initialize core_output with correct shape and type
-        core_output = np.zeros_like(x, dtype=np.float32)
-
-        try:
-            if elementwise:
-                # Vectorized elementwise operation if possible
-                x_flat = x.reshape(-1, self.feature_dim)
-                y_flat = y.reshape(-1, self.feature_dim) if y is not None else None
-
-                results_flat = np.zeros_like(x_flat)
-                for i in range(x_flat.shape[0]):
-                    x_vec = x_flat[i]
-                    y_vec = y_flat[i] if y_flat is not None else None
-                    op_result = operation_func(x_vec, y_vec, params) # Operates on feature_dim
-
-                    if op_result is None:
-                         op_result = np.zeros(self.feature_dim, dtype=np.float32)
-                    elif np.isscalar(op_result):
-                         op_result = np.full(self.feature_dim, op_result, dtype=np.float32)
-                    elif op_result.shape != (self.feature_dim,):
-                         print(f"Warning: Output of elementwise op {operation_func.__name__} has shape {op_result.shape}, expected ({self.feature_dim},). Resizing.")
-                         try:
-                              op_result = np.resize(op_result, self.feature_dim).astype(np.float32)
-                         except Exception as resize_e:
-                              print(f"Error resizing output: {resize_e}. Using zeros.")
-                              op_result = np.zeros(self.feature_dim, dtype=np.float32)
-
-                    results_flat[i] = op_result.astype(np.float32) # Ensure float32 here
-
-                core_output = results_flat.reshape(batch_size, seq_len, self.feature_dim)
-
-            else: # Sequence operations
-                results_list = []
-                for b_idx in range(batch_size):
-                    x_seq = x[b_idx] # Shape (seq_len, feature_dim)
-                    y_seq = y[b_idx] if y is not None else None
-                    op_result = operation_func(x_seq, y_seq, params) # Operates on (seq_len, feature_dim)
-
-                    # --- Validate and Align Sequence Op Output ---
-                    if op_result is None:
-                         print(f"Warning: Sequence op {operation_func.__name__} returned None for batch {b_idx}. Using zeros.")
-                         op_result = np.zeros((seq_len, self.feature_dim), dtype=np.float32)
-                    elif np.isscalar(op_result):
-                         # If scalar, broadcast to (seq_len, feature_dim)
-                        #  print(f"Warning: Sequence op {operation_func.__name__} returned scalar {op_result}. Broadcasting.")
-                         op_result = np.full((seq_len, self.feature_dim), op_result, dtype=np.float32)
-                    elif op_result.shape == (self.feature_dim,):
-                         # If op returns single vector (e.g., max), tile it across seq_len
-                         op_result = np.tile(op_result.astype(np.float32), (seq_len, 1))
-                    elif op_result.shape == (seq_len, self.feature_dim):
-                         pass # Correct shape
-                    else: # Attempt resize as fallback, log warning
-                         print(f"Warning: Output of sequence op {operation_func.__name__} has shape {op_result.shape}, expected ({seq_len}, {self.feature_dim}). Resizing.")
-                         try:
-                              op_result = np.resize(op_result, (seq_len, self.feature_dim)).astype(np.float32)
-                         except Exception as resize_e:
-                              print(f"Error resizing output: {resize_e}. Using zeros.")
-                              op_result = np.zeros((seq_len, self.feature_dim), dtype=np.float32)
-                    # --- End Validation ---
-
-                    results_list.append(op_result.astype(np.float32)) # Ensure float32
-
-                core_output = np.stack(results_list, axis=0) # Stack results into (batch, seq, feat)
-
-        except Exception as core_op_e:
-             print(f"Error during core operation execution ({operation_func.__name__}): {core_op_e}")
-             traceback.print_exc()
-             return None # Return None if core operation fails
-
-        # --- Apply Learnable Transformation (Wx + b) ---
-        core_output_flat = core_output.reshape(-1, self.feature_dim)
-        try:
-             # W is (feat, feat), b is (feat,)
-             # core_output_flat is (batch*seq, feat)
-             # Result should be (batch*seq, feat)
-             transformed_flat = core_output_flat @ W + b # W and b are already float32
-        except Exception as transform_e:
-             print(f"Error during learnable transformation (Wx+b): {transform_e}")
-             traceback.print_exc()
-             # Check shapes if error occurs
-             print(f"Shapes - core_output_flat: {core_output_flat.shape}, W: {W.shape}, b: {b.shape}")
-             return None # Return None if transformation fails
-
-        # Reshape back to (batch, seq_len, feature_dim)
-        final_output = transformed_flat.reshape(batch_size, seq_len, self.feature_dim)
-
-        # Handle potential NaN/Inf values
-        if not np.all(np.isfinite(final_output)):
-             # print(f"Warning: NaN/Inf detected in output of _apply_operation for {operation_func.__name__}. Clamping values.") # Optional warning
-             final_output = np.nan_to_num(final_output, nan=0.0, posinf=1e6, neginf=-1e6, copy=False)
-
-        return final_output.astype(np.float32) # Final dtype check
-
-
-    # --- Core functions (_placeholder_op_core, addition_core, etc.) ---
-    # Ensure all core functions return np.float32 arrays or scalars that can be broadcast
-    def _placeholder_op_core(self, x, y, params):
-         """Core logic for placeholder operation. Returns first input or zeros."""
-         print(f"Warning: Using placeholder core for operation (should not happen).")
-         if x is not None:
-              return x.copy().astype(np.float32)
-         return np.zeros(self.feature_dim, dtype=np.float32)
-
-
-    # --- Arithmetic ---
-    def addition_core(self, x, y, params):
-        if x is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        res = x + y if y is not None else x
-        return res.astype(np.float32)
-
-    def subtraction_core(self, x, y, params):
-        if x is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        res = x - y if y is not None else x
-        return res.astype(np.float32)
-
-    def multiplication_core(self, x, y, params):
-        if x is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        res = x * y if y is not None else x
-        return res.astype(np.float32)
-
-    def division_core(self, x, y, params):
-        epsilon = 1e-8
-        if x is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        if y is not None:
-            denominator = np.where(np.abs(y) > epsilon, y, epsilon * np.sign(y + epsilon))
-            res = x / denominator
-        else: # Division by 1 if y is None
-            res = x
-        return np.nan_to_num(res, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32)
-
-
-    # --- Algebra ---
-    def exponentiation_core(self, x, y, params):
-        if x is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        base = x
-        default_exponent = np.full_like(x, 2.0, dtype=np.float32)
-        exponent = y if y is not None else default_exponent
-        safe_base = np.abs(base) + 1e-6
-        safe_exponent = np.clip(exponent, -5, 5)
-        try:
-            result = np.power(safe_base, safe_exponent)
-            return np.nan_to_num(result, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32)
-        except Exception as e:
-            print(f"Error in exponentiation_core: {e}")
-            return np.zeros_like(x, dtype=np.float32)
-
-
-    def root_extraction_core(self, x, y, params):
-        if x is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        val = x
-        default_root = np.full_like(x, 2.0, dtype=np.float32)
-        root_val = y if y is not None else default_root
-        epsilon = 1e-6
-        safe_val = np.abs(val) + epsilon
-        safe_root = np.clip(root_val, -10, 10)
-        safe_root = np.where(np.abs(safe_root) > epsilon, safe_root, epsilon * np.sign(safe_root + epsilon))
-        inv_root = 1.0 / safe_root
-        try:
-            result = np.power(safe_val, inv_root)
-            return np.nan_to_num(result, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32)
-        except Exception as e:
-            print(f"Error in root_extraction_core: {e}")
-            return np.zeros_like(x, dtype=np.float32)
-
-
-    # --- Calculus (Sequence Operations) ---
-    def derivative_core(self, x_seq, y_seq, params):
-        # x_seq shape: (seq_len, feature_dim)
-        if x_seq is None:
-             print("Warning (derivative_core): x_seq is None.")
-             return np.zeros((self.sequence_length, self.feature_dim), dtype=np.float32)
-        if x_seq.shape[0] < 2:
-            return np.zeros_like(x_seq, dtype=np.float32)
-        try:
-            grad = np.gradient(x_seq, axis=0)
-            return np.nan_to_num(grad, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32)
-        except Exception as e:
-            print(f"Error in derivative_core: {e}")
-            return np.zeros_like(x_seq, dtype=np.float32)
-
-
-    def integral_core(self, x_seq, y_seq, params):
-        # x_seq shape: (seq_len, feature_dim)
-        if x_seq is None:
-            print("Warning (integral_core): x_seq is None.")
-            return np.zeros((self.sequence_length, self.feature_dim), dtype=np.float32)
-        try:
-            cumsum = np.cumsum(x_seq, axis=0)
-            return np.nan_to_num(cumsum, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32)
-        except Exception as e:
-            print(f"Error in integral_core: {e}")
-            return np.zeros_like(x_seq, dtype=np.float32)
-
-
-    # --- Transforms (Sequence Operations) ---
-    def fourier_transform_core(self, x_seq, y_seq, params):
-        if x_seq is None:
-             print("Warning (fourier_transform_core): x_seq is None.")
-             return np.zeros((self.sequence_length, self.feature_dim), dtype=np.float32)
-        seq_len, feat_dim = x_seq.shape
-
-        try:
-            # Use numpy's FFT
-            fft_result = np_fft.fft(x_seq, axis=0) # Shape: (seq_len, feat_dim), dtype=complex
-
-            # Represent complex output in real-valued feature space
-            output = np.zeros_like(x_seq, dtype=np.float32)
-            if feat_dim >= 2:
-                 real_part = np.real(fft_result)
-                 imag_part = np.imag(fft_result)
-                 # Interleave real and imaginary parts, handling odd feature dim
-                 half_dim = feat_dim // 2
-                 output[:, 0:half_dim*2:2] = real_part[:, :half_dim]
-                 output[:, 1:half_dim*2+1:2] = imag_part[:, :half_dim]
-                 if feat_dim % 2 == 1: # Handle odd feature dimension
-                      output[:, -1] = real_part[:, half_dim] # Store last real part
-            else: # feat_dim == 1
-                 output[:, 0] = np.abs(fft_result)[:, 0]
-
-            return np.nan_to_num(output, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32)
-        except Exception as e:
-             print(f"Error in fourier_transform_core: {e}")
-             traceback.print_exc()
-             return np.zeros_like(x_seq, dtype=np.float32)
-
-
-    def inverse_fourier_transform_core(self, x_seq, y_seq, params):
-        if x_seq is None:
-             print("Warning (inverse_fourier_transform_core): x_seq is None.")
-             return np.zeros((self.sequence_length, self.feature_dim), dtype=np.float32)
-        seq_len, feat_dim = x_seq.shape
-
-        try:
-            # Reconstruct complex representation from real-valued features
-            complex_repr = np.zeros((seq_len, feat_dim // 2 + feat_dim % 2), dtype=np.complex128)
-            if feat_dim >= 1:
-                 complex_repr.real = x_seq[:, 0::2] # Real parts from even indices
-            if feat_dim >= 2:
-                 complex_repr.imag[:, :feat_dim//2] = x_seq[:, 1::2] # Imaginary parts from odd indices
-
-            # Compute IFFT using numpy
-            ifft_result = np_fft.ifft(complex_repr, n=seq_len, axis=0) # Specify output length n=seq_len
-
-            # Return the real part, ensure shape matches original feature dim
-            real_ifft = np.real(ifft_result)
-            output = np.zeros_like(x_seq, dtype=np.float32)
-            cols_to_copy = min(real_ifft.shape[1], feat_dim)
-            output[:, :cols_to_copy] = real_ifft[:, :cols_to_copy] # Copy back, potentially padding with zeros if ifft output is smaller
-
-            return np.nan_to_num(output, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32)
-        except Exception as e:
-             print(f"Error in inverse_fourier_transform_core: {e}")
-             traceback.print_exc()
-             return np.zeros_like(x_seq, dtype=np.float32)
-
-
-    # --- Functional Analysis (Sequence Operation) ---
-    def convolution_core(self, x_seq, y_seq, params):
-        if x_seq is None:
-             print("Warning (convolution_core): x_seq is None.")
-             return np.zeros((self.sequence_length, self.feature_dim), dtype=np.float32)
-        seq_len, feat_dim = x_seq.shape
-        result = np.zeros_like(x_seq, dtype=np.float32)
-
-        kernel_source = None
-        if y_seq is not None:
-             if y_seq.ndim == 2 and y_seq.shape[1] == feat_dim and y_seq.shape[0] > 0:
-                  kernel_source = y_seq
-             else:
-                  print(f"Warning (convolution_core): y_seq shape {y_seq.shape} incompatible. Using default kernel.")
-
-        if kernel_source is not None:
-             kernel_len = kernel_source.shape[0]
-             for f in range(feat_dim):
-                  try:
-                       kernel = kernel_source[:, f]
-                       result[:, f] = signal.convolve(x_seq[:, f], kernel, mode='same', method='auto')
-                  except Exception as e:
-                       print(f"Convolution error (using y_seq) feature {f}: {e}")
-                       result[:, f] = x_seq[:, f] # Fallback
+        if y_param.shape == (feature_dim, feature_dim):
+            return torch.diag(y_param) # Return diagonal
+        elif y_param.shape == (feature_dim,):
+            return y_param # Already a vector
+        elif y_param.numel() == feature_dim:
+             print(f"Warning in {op_name}_core ({node.name}): learnable_param shape {y_param.shape} not standard, attempting reshape to ({feature_dim},).")
+             try:
+                 return y_param.view(feature_dim)
+             except RuntimeError:
+                 print(f"Error: Could not reshape learnable param {y_param.shape} to vector.")
+                 return None
         else:
-             kernel_size = min(5, seq_len)
-             if kernel_size > 0:
-                  try:
-                       kernel = signal.windows.gaussian(kernel_size, std=1)
-                       kernel /= np.sum(kernel)
-                       for f in range(feat_dim):
-                            result[:, f] = signal.convolve(x_seq[:, f], kernel, mode='same', method='auto')
-                  except Exception as e:
-                       print(f"Default convolution error: {e}")
-                       result = x_seq.copy()
-             else:
-                  result = x_seq.copy()
+             print(f"Error in {op_name}_core ({node.name}): learnable_param shape {y_param.shape} incompatible with vector use.")
+             return None
 
-        return np.nan_to_num(result, nan=0.0, posinf=1e6, neginf=-1e6).astype(np.float32)
-
-
-    # --- Set/Logic Operations (Elementwise Fuzzy Logic Placeholders) ---
-    def set_union_core(self, x, y, params): # Fuzzy OR (max)
-        if x is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        res = np.maximum(x, y) if y is not None else x
-        return res.astype(np.float32)
-
-    def set_intersection_core(self, x, y, params): # Fuzzy AND (min)
-        if x is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        res = np.minimum(x, y) if y is not None else x
-        return res.astype(np.float32)
-
-    def set_complement_core(self, x, y, params): # Fuzzy NOT (1 - x)
-        if x is None: return np.ones(self.feature_dim, dtype=np.float32)
-        clipped_x = np.clip(x, 0.0, 1.0)
-        return (1.0 - clipped_x).astype(np.float32)
-
-    def logical_and_core(self, x, y, params):
-        return self.set_intersection_core(x, y, params)
-
-    def logical_or_core(self, x, y, params):
-        return self.set_union_core(x, y, params)
-
-    def logical_not_core(self, x, y, params):
-        return self.set_complement_core(x, y, params)
-
-
-    # --- Geometry (Elementwise Operations on feature vectors) ---
-    def rotation_core(self, x_vec, y_vec, params):
-         if x_vec is None: return np.zeros(self.feature_dim, dtype=np.float32)
-         if self.feature_dim < 2: return x_vec.astype(np.float32)
-
-         theta = y_vec[0] if y_vec is not None and y_vec.size > 0 else np.pi / 4.0
-         try: theta = float(theta)
-         except (ValueError, TypeError): theta = np.pi / 4.0
-
-         try:
-            cos_t, sin_t = np.cos(theta), np.sin(theta)
-            rot_matrix = np.array([[cos_t, -sin_t], [sin_t, cos_t]], dtype=np.float32)
-            result = np.copy(x_vec)
-            result[:2] = rot_matrix @ x_vec[:2]
-            return result.astype(np.float32)
-         except Exception as e:
-             print(f"Error in rotation_core: {e}")
-             return x_vec.astype(np.float32)
-
-
-    def reflection_core(self, x_vec, y_vec, params):
-        if x_vec is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        if self.feature_dim < 2: return x_vec.astype(np.float32)
-
-        theta = y_vec[0] if y_vec is not None and y_vec.size > 0 else np.pi / 2.0
-        try: theta = float(theta)
-        except (ValueError, TypeError): theta = np.pi / 2.0
+    def _apply_elementwise_binary(self, x: torch.Tensor, node: MathNode, op_func: callable, op_name: str) -> torch.Tensor:
+        """Helper for element-wise binary ops using diagonal/vector of learnable param."""
+        y_vector = self._get_learnable_param_as_vector(node, op_name)
+        if y_vector is None:
+            return x # Fallback to input if param is invalid
 
         try:
-            cos_2t, sin_2t = np.cos(2 * theta), np.sin(2 * theta)
-            refl_matrix = np.array([[cos_2t, sin_2t], [sin_2t, -cos_2t]], dtype=np.float32)
-            result = np.copy(x_vec)
-            result[:2] = refl_matrix @ x_vec[:2]
-            return result.astype(np.float32)
+            # Broadcasting: (B, S, F) op (F,) -> (B, S, F)
+            return op_func(x, y_vector)
+        except RuntimeError as e:
+             print(f"Error during {op_name}_core ({node.name}): {e}. Shapes: x={x.shape}, y_vec={y_vector.shape}")
+             return x # Fallback
+
+    # --- Arithmetic & Basic Ops ---
+    def add_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        return self._apply_elementwise_binary(x, node, torch.add, "add")
+
+    def sub_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        return self._apply_elementwise_binary(x, node, torch.sub, "sub")
+
+    def mul_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        return self._apply_elementwise_binary(x, node, torch.mul, "mul")
+
+    def div_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        y_vector = self._get_learnable_param_as_vector(node, "div")
+        if y_vector is None: return x
+        try:
+            y_safe = y_vector + 1e-8 * torch.sign(y_vector).detach()
+            y_safe[y_safe == 0] = 1e-8
+            return torch.div(x, y_safe)
+        except RuntimeError as e:
+             print(f"Error during div_core ({node.name}): {e}. Shapes: x={x.shape}, y_safe={y_safe.shape}")
+             return x
+
+    def pow_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        # x ^ diag(y)
+        y_vector = self._get_learnable_param_as_vector(node, "pow")
+        if y_vector is None: return x
+        try:
+            # Use abs base? Clamp exponent? Be careful with gradients for negative bases.
+            base = torch.relu(x) + 1e-6 # Ensure base is non-negative for stability
+            # base = x # Alternative: allow negative base but risk NaN gradients
+            exponent = torch.clamp(y_vector, -10, 10) # Clamp exponent range
+            return torch.pow(base, exponent)
+        except RuntimeError as e:
+             print(f"Error during pow_core ({node.name}): {e}. Shapes: x={x.shape}, exponent={exponent.shape}")
+             return x
+
+    def root_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        # x ^ (1 / diag(y))
+        y_vector = self._get_learnable_param_as_vector(node, "root")
+        if y_vector is None: return x
+        try:
+            # --- Stabilize the exponent denominator ---
+            # Ensure non-zero by clamping absolute value away from zero, then restore sign
+            y_abs_clamped = torch.clamp(torch.abs(y_vector), min=1e-6) # Clamp magnitude away from 0
+            y_safe = y_abs_clamped * torch.sign(y_vector)
+            # Handle case where original sign was zero (clamp introduced non-zero) - set to small value
+            y_safe[y_vector == 0] = 1e-6
+            # --- Calculate clamped exponent ---
+            exponent = 1.0 / y_safe
+            exponent = torch.clamp(exponent, -20, 20) # Clamp final exponent more aggressively
+
+            # --- Ensure base is non-negative ---
+            base = torch.relu(x) + 1e-7 # Ensure base non-negative and slightly > 0
+
+            # --- Perform power operation ---
+            result = torch.pow(base, exponent)
+
+            # --- Final clamp on output just in case ---
+            result = torch.clamp(result, -1e6, 1e6)
+
+            return result
+        except RuntimeError as e:
+             print(f"Error during root_core ({node.name}): {e}. Shapes: x={x.shape}, exponent={exponent.shape if 'exponent' in locals() else 'N/A'}")
+             return x # Fallback
+        except Exception as e: # Catch other potential errors
+             print(f"Unexpected error in root_core ({node.name}): {e}")
+             return x
+
+    def mod_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        # x % diag(y)
+        y_vector = self._get_learnable_param_as_vector(node, "mod")
+        if y_vector is None: return x
+        try:
+            # Ensure divisor is positive for stability? torch.fmod handles signs.
+            y_abs = torch.abs(y_vector) + 1e-6 # Use positive divisor
+            return torch.fmod(x, y_abs)
+        except RuntimeError as e:
+             print(f"Error during mod_core ({node.name}): {e}. Shapes: x={x.shape}, y_vec={y_vector.shape}")
+             return x
+
+    # --- Linear Algebra ---
+    def matmul_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        # x @ y, y is (F, F)
+        if node.learnable_param is None or node.learnable_param.shape != (self.feature_dim, self.feature_dim):
+            print(f"Error in matmul_core ({node.name}): Invalid learnable_param shape ({node.learnable_param.shape if node.learnable_param is not None else 'None'}).")
+            return x
+        y = node.learnable_param
+
+        if x.shape[-1] != y.shape[0]:
+            print(f"Error in matmul_core ({node.name}): Shape mismatch. x shape {x.shape}, y shape {y.shape}")
+            return x
+        try:
+            return torch.matmul(x, y)
+        except RuntimeError as e:
+             print(f"Error during matmul_core ({node.name}): {e}. Shapes: x={x.shape}, y={y.shape}")
+             return x
+
+    def inner_prod_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        # sum(x * diag(y), dim=-1, keepdim=True) -> (B, S, 1)
+        y_vector = self._get_learnable_param_as_vector(node, "inner_prod")
+        if y_vector is None: return x
+        try:
+            elementwise_prod = x * y_vector
+            # Sum over the feature dimension
+            # Keep dimension to allow broadcasting later, output (B, S, 1)
+            inner_product = torch.sum(elementwise_prod, dim=-1, keepdim=True)
+            return inner_product
+        except RuntimeError as e:
+             print(f"Error during inner_prod_core ({node.name}): {e}. Shapes: x={x.shape}, y_vec={y_vector.shape}")
+             return x
+
+    # --- Transforms ---
+    def fft_mag_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        # FFT along sequence dim, return magnitude
+        try:
+            # Ensure input is float or complex
+            if not torch.is_floating_point(x) and not torch.is_complex(x):
+                 print(f"Warning: Input to fft_mag_core ({node.name}) is not float/complex ({x.dtype}). Casting to float.")
+                 x = x.float()
+
+            # Dim=1 is sequence dimension for (B, S, F)
+            fft_result = torch_fft.fft(x, dim=1)
+            return torch.abs(fft_result)
         except Exception as e:
-            print(f"Error in reflection_core: {e}")
-            return x_vec.astype(np.float32)
+            print(f"Error in fft_mag_core ({node.name}): {e}. Input shape: {x.shape}")
+            return x
 
+    def ifft_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        # Placeholder: If input is real (e.g., magnitude from fft_mag), phase is lost.
+        # Just return input for now. A proper IFFT needs complex input.
+        # if torch.is_complex(x):
+        #     try:
+        #         ifft_result = torch_fft.ifft(x, dim=1)
+        #         return ifft_result.real # Return real part?
+        #     except Exception as e:
+        #         print(f"Error in ifft_core ({node.name}): {e}. Input shape: {x.shape}")
+        #         return x
+        # else:
+             # print(f"Warning: Input to ifft_core ({node.name}) is not complex. Returning input directly.")
+             return x
 
-    def translation_core(self, x_vec, y_vec, params):
-        if x_vec is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        default_translation = np.full(self.feature_dim, 0.1, dtype=np.float32)
-        translation_vector = y_vec if y_vec is not None else default_translation
+    # --- Functional Analysis ---
+    def conv1d_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        # Input (B, S, F) -> Expected by Conv1d: (B, F, S)
+        # Use learnable param y (F, F) as kernel for 1x1 convolution
+        if node.learnable_param is None:
+            print(f"Error in conv1d_core ({node.name}): learnable_param is None.")
+            return x
+        y_param = node.learnable_param # Shape (F, F)
+
+        in_channels = self.feature_dim
+        out_channels = self.feature_dim
+        kernel_size = 1 # Force 1x1 convolution
+        padding = 0     # No padding needed for 1x1
+
+        # --- Reshape y_param (F, F) into (F, F, 1) kernel ---
+        expected_shape = (out_channels, in_channels, kernel_size)
+        kernel_weight = None
+
+        if y_param.shape == (out_channels, in_channels):
+            try:
+                # Unsqueeze the last dimension to create (F, F, 1)
+                kernel_weight = y_param.unsqueeze(-1).contiguous()
+            except Exception as e:
+                 print(f"Error unsqueezing param ({y_param.shape}) to Conv1d 1x1 kernel {expected_shape} in {node.name}: {e}")
+                 return x # Fallback
+        else:
+             print(f"Error in conv1d_core ({node.name}): Param shape {y_param.shape} not suitable for 1x1 kernel (needs {(out_channels, in_channels)}).")
+             return x # Fallback
+
+        # --- Perform 1x1 Convolution ---
+        try:
+            x_permuted = x.permute(0, 2, 1).contiguous() # (B, F, S)
+            output_permuted = nn.functional.conv1d(
+                x_permuted,
+                weight=kernel_weight, # Use derived (F, F, 1) kernel
+                bias=None,
+                stride=1,
+                padding=padding # Should be 0
+            )
+            output = output_permuted.permute(0, 2, 1).contiguous() # (B, S, F) - back to original layout
+            # Output shape should be same as input for 1x1 conv with padding 0
+            if output.shape != x.shape:
+                print(f"Warning: Conv1D 1x1 output shape {output.shape} differs from input {x.shape}.")
+                # Might need adjustments if stride/padding logic changes later
+            return output
+        except Exception as e:
+             print(f"Error during 1x1 conv1d operation ({node.name}): {e}. Shapes: x={x.shape}, kernel={kernel_weight.shape}")
+             return x # Fallback
+
+    # --- Activations & Unary ---
+    def tanh_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        return torch.tanh(x)
+
+    def relu_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        return torch.relu(x)
+
+    def sigmoid_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        return torch.sigmoid(x)
+
+    def log_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        # Natural log: log(relu(x) + epsilon) for stability
+        try:
+            safe_x = torch.relu(x) + 1e-8
+            return torch.log(safe_x)
+        except Exception as e:
+            print(f"Error in log_core ({node.name}): {e}. Input shape {x.shape}")
+            return x
+
+    # --- Normalization ---
+    def layernorm_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        normalized_shape = x.shape[-1:]
+        try:
+            bias_param = None
+            if node.learnable_role == 'bias' and node.learnable_param is not None:
+                 if node.learnable_param.shape == (self.feature_dim,):
+                      bias_param = node.learnable_param
+                 else: pass # Warning printed elsewhere if role mismatch
+            # Add scale param handling if defined
+            weight_param = None
+            # if node.learnable_role == 'scale' ... weight_param = node.learnable_param ...
+
+            return nn.functional.layer_norm(x, normalized_shape, weight=weight_param, bias=bias_param, eps=1e-5)
+        except Exception as e:
+             print(f"Error in layernorm_core ({node.name}): {e}. Shape: {x.shape}")
+             return x
+
+    # --- Order/Analysis (Reductions) ---
+    def _reduction_op(self, x: torch.Tensor, node: MathNode, reduction_func: callable, op_name: str) -> torch.Tensor:
+        if x is None or x.ndim < 2: # Need at least (B, S) or (S, F) etc.
+            print(f"Warning: Input for {op_name} reduction ({node.name}) is not suitable (shape {x.shape if x is not None else 'None'}).")
+            return x
+        # Reduce along sequence dimension (dim=1 for B,S,F)
+        reduction_dim = 1 if x.ndim > 1 else 0 # Reduce along first non-batch dim
+        if x.ndim <= reduction_dim:
+            print(f"Warning: Input for {op_name} reduction ({node.name}) has insufficient dims ({x.ndim}) for dim {reduction_dim}.")
+            return x
 
         try:
-            if translation_vector.shape != x_vec.shape:
-                 translation_vector = np.resize(translation_vector, x_vec.shape)
-            return (x_vec + translation_vector).astype(np.float32)
+            keep_dim = True # Keep reduced dim for broadcasting compatibility
+            if reduction_func == torch.mean:
+                 result_reduced = reduction_func(x, dim=reduction_dim, keepdim=keep_dim)
+            elif reduction_func in [torch.max, torch.min]:
+                 result_reduced, _ = reduction_func(x, dim=reduction_dim, keepdim=keep_dim)
+            else: raise ValueError(f"Unsupported reduction function: {reduction_func}")
+            return result_reduced
         except Exception as e:
-            print(f"Error in translation_core: {e}")
-            return x_vec.astype(np.float32)
+            print(f"Error in {op_name} reduction ({node.name}): {e}. Input shape: {x.shape}")
+            return x
 
+    def supremum_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor: # Max
+        return self._reduction_op(x, node, torch.max, "supremum")
 
-    def distance_core(self, x_vec, y_vec, params):
-        # Returns a scalar (broadcast by _apply_operation)
-        if x_vec is None or y_vec is None: return 0.0
+    def infimum_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor: # Min
+        return self._reduction_op(x, node, torch.min, "infimum")
+
+    def mean_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor: # Average
+        return self._reduction_op(x, node, torch.mean, "mean")
+
+    # --- Geometry (Unary Elementwise) ---
+    def translate_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        # x + y_bias
+        if node.learnable_role != 'bias' or node.learnable_param is None:
+             print(f"Error: Translate node {node.name} requires learnable 'bias' param.")
+             return x
+        if node.learnable_param.shape != (self.feature_dim,):
+             print(f"Error: Translate node {node.name} bias param has wrong shape {node.learnable_param.shape}.")
+             return x
+        bias = node.learnable_param
         try:
-            if y_vec.shape != x_vec.shape: y_vec = np.resize(y_vec, x_vec.shape)
-            dist = np.linalg.norm(x_vec - y_vec)
-            return np.float32(dist) if np.isfinite(dist) else np.float32(0.0)
-        except Exception as e:
-            print(f"Error in distance_core: {e}")
-            return np.float32(0.0)
+            return x + bias
+        except RuntimeError as e:
+             print(f"Error during translate_core ({node.name}): {e}. Shapes: x={x.shape}, bias={bias.shape}")
+             return x
 
-
-    # --- Linear Algebra (Elementwise Operations on feature vectors) ---
-    def scalar_multiplication_core(self, x_vec, y_vec, params):
-        if x_vec is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        scalar = y_vec[0] if y_vec is not None and y_vec.size > 0 else 1.0
-        try: scalar = float(scalar)
-        except (ValueError, TypeError): scalar = 1.0
-        return (x_vec * scalar).astype(np.float32)
-
-
-    def inner_product_core(self, x_vec, y_vec, params):
-        # Returns a scalar (broadcast by _apply_operation)
-        if x_vec is None or y_vec is None: return 0.0
+    def scale_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+        # x * y_scale
+        if node.learnable_role != 'scale' or node.learnable_param is None:
+             print(f"Error: Scale node {node.name} requires learnable 'scale' param.")
+             return x
+        if node.learnable_param.shape != (self.feature_dim,):
+             print(f"Error: Scale node {node.name} scale param has wrong shape {node.learnable_param.shape}.")
+             return x
+        scale = node.learnable_param
         try:
-            if y_vec.shape != x_vec.shape: y_vec = np.resize(y_vec, x_vec.shape)
-            dot = np.dot(x_vec, y_vec)
-            return np.float32(dot) if np.isfinite(dot) else np.float32(0.0)
-        except Exception as e:
-            print(f"Error in inner_product_core: {e}")
-            return np.float32(0.0)
-
-
-    # Inside MathSelfPlayEnv class in math_env.py
-
-    def matrix_multiplication_core(self, x, y, params):
-        # Placeholder: Elementwise product
-        # print("Warning (matrix_multiplication_core): Using elementwise product as placeholder.") # <--- THIS LINE CAUSES THE WARNING
-        if x is None: return np.zeros_like(y, dtype=np.float32) if y is not None else np.zeros(self.feature_dim, dtype=np.float32)
-        if y is None: return x.astype(np.float32)
-        try:
-            if y.shape != x.shape: y = np.resize(y, x.shape)
-            return (x * y).astype(np.float32)
-        except Exception as e:
-             print(f"Error in matrix_multiplication_core (placeholder): {e}")
-             return x.astype(np.float32)
-
-
-
-    # --- Number Theory (Elementwise, requires integer interpretation) ---
-    def gcd_core(self, x, y, params):
-        if x is None or y is None:
-             return np.ones(self.feature_dim, dtype=np.float32)
-        try:
-            x_int = np.round(np.abs(x)).astype(int)
-            y_int = np.round(np.abs(y)).astype(int)
-            if y_int.shape != x_int.shape: y_int = np.resize(y_int, x_int.shape)
-            gcd_func = np.vectorize(math.gcd)
-            result = gcd_func(x_int, y_int)
-            return result.astype(np.float32)
-        except Exception as e:
-            print(f"Error in gcd_core: {e}")
-            return np.ones_like(x, dtype=np.float32)
-
-
-    def modulo_core(self, x, y, params):
-        if x is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        if y is None:
-             # print("Warning (modulo_core): y is None. Returning x.") # Reduce noise
-             return x.astype(np.float32)
-
-        epsilon = 1e-8
-        try:
-            if y.shape != x.shape: y = np.resize(y, x.shape)
-            divisor = np.where(np.abs(y) > epsilon, y, epsilon * np.sign(y + epsilon))
-            result = np.fmod(x, divisor)
-            return np.nan_to_num(result, nan=0.0).astype(np.float32)
-        except Exception as e:
-            print(f"Error in modulo_core: {e}")
-            return x.astype(np.float32)
-
-
-    def factorial_core(self, x, y, params):
-        if x is None: return np.ones(self.feature_dim, dtype=np.float32)
-        try:
-            x_int = np.clip(np.round(x), 0, 15).astype(int) # Limit range
-            result = special.factorial(x_int, exact=False)
-            return np.nan_to_num(result, nan=1.0, posinf=1e6).astype(np.float32)
-        except Exception as e:
-            print(f"Error in factorial_core: {e}")
-            return np.ones_like(x, dtype=np.float32)
-
-
-    def binomial_coefficient_core(self, x, y, params):
-        if x is None or y is None: return np.zeros(self.feature_dim, dtype=np.float32)
-        try:
-            n = np.clip(np.round(x), 0, 30).astype(int)
-            k = np.clip(np.round(y), 0, 30).astype(int)
-            if k.shape != n.shape: k = np.resize(k, n.shape)
-            result = special.comb(n, k, exact=False)
-            return np.nan_to_num(result, nan=0.0, posinf=1e6).astype(np.float32)
-        except Exception as e:
-            print(f"Error in binomial_coefficient_core: {e}")
-            return np.zeros_like(x, dtype=np.float32)
-
-
-    # --- Analysis/Order (Supremum/Infimum are sequence ops, Measure is placeholder) ---
-    def supremum_core(self, x_seq, y_seq, params):
-        # Returns shape (feature_dim,) -> broadcast by _apply_operation
-        if x_seq is None or x_seq.size == 0:
-             return np.zeros(self.feature_dim, dtype=np.float32)
-        try:
-            result = np.max(x_seq, axis=0)
-            return result.astype(np.float32) if np.all(np.isfinite(result)) else np.zeros(self.feature_dim, dtype=np.float32)
-        except Exception as e:
-            print(f"Error in supremum_core: {e}")
-            return np.zeros(self.feature_dim, dtype=np.float32)
-
-
-    def infimum_core(self, x_seq, y_seq, params):
-        # Returns shape (feature_dim,) -> broadcast by _apply_operation
-        if x_seq is None or x_seq.size == 0:
-             return np.zeros(self.feature_dim, dtype=np.float32)
-        try:
-            result = np.min(x_seq, axis=0)
-            return result.astype(np.float32) if np.all(np.isfinite(result)) else np.zeros(self.feature_dim, dtype=np.float32)
-        except Exception as e:
-            print(f"Error in infimum_core: {e}")
-            return np.zeros(self.feature_dim, dtype=np.float32)
-
-
-    def measure_core(self, x_seq, y_seq, params):
-        # Placeholder: L1 norm over sequence. Returns scalar -> broadcast by _apply_operation
-        if x_seq is None or x_seq.size == 0: return np.float32(0.0)
-        try:
-            measure = np.sum(np.abs(x_seq))
-            return np.float32(measure) if np.isfinite(measure) else np.float32(0.0)
-        except Exception as e:
-            print(f"Error in measure_core: {e}")
-            return np.float32(0.0)
-
-
-    # --- Information Theory (Sequence Operation) ---
-    def entropy_core(self, x_seq, y_seq, params):
-        # Returns a scalar -> broadcast by _apply_operation
-        if x_seq is None or x_seq.size == 0: return np.float32(0.0)
-
-        try:
-            flat_seq = x_seq.flatten()
-            min_val, max_val = np.min(flat_seq), np.max(flat_seq)
-            range_val = max_val - min_val
-            if range_val < 1e-8: return np.float32(0.0) # Entropy is 0 if all values are the same
-
-            normalized_seq = (flat_seq - min_val) / range_val
-            num_bins = 10
-            hist, _ = np.histogram(normalized_seq, bins=num_bins, range=(0, 1))
-            total_counts = hist.sum()
-            if total_counts == 0: return np.float32(0.0)
-
-            probabilities = hist[hist > 0] / total_counts
-            entropy = -np.sum(probabilities * np.log2(probabilities))
-            return np.float32(entropy) if np.isfinite(entropy) else np.float32(0.0)
-        except Exception as e:
-            print(f"Error in entropy_core: {e}")
-            traceback.print_exc()
-            return np.float32(0.0)
+            return x * scale
+        except RuntimeError as e:
+             print(f"Error during scale_core ({node.name}): {e}. Shapes: x={x.shape}, scale={scale.shape}")
+             return x
 
     def close(self):
-        """Clean up any resources (if needed)."""
-        pass # No specific resources to close in this version
+        """Clean up any resources."""
+        print("Closing MathSelfPlayEnv.")
+        pass
 
+# --- Training Note (Unchanged) ---
+# ... (Keep the note about external training)
+
+# --- Example Usage (Updated for new ops) ---
+# if __name__ == '__main__':
+#     print("Testing MathSelfPlayEnv with PyTorch backend (Expanded Ops)...")
+
+#     env_config = {
+#         'grid_size': 6,        # Slightly larger grid
+#         'max_steps': 30,       # More steps
+#         'feature_dim': 8,     # Keep feature dim reasonable
+#         'batch_size': 16,
+#         'sequence_length': 12,
+#         'task': 'reverse',
+#         'device': torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#     }
+
+#     env = MathSelfPlayEnv(**env_config)
+#     obs, info = env.reset(seed=123)
+
+#     print(f"Initial Observation (Board Shape): {obs['board'].shape}")
+#     env.render()
+
+#     total_reward = 0
+#     terminated, truncated = False, False
+#     step_count = 0
+
+#     # --- Simple Random Agent Loop ---
+#     while not terminated and not truncated:
+#         step_count += 1
+#         action = env.action_space.sample()
+
+#         print(f"\n--- Step {step_count} (Env Step: {env.steps_taken}) ---")
+#         action_op_name = env.operation_types.get(action['operation_id'], 'UnknownOp')
+#         print(f"Player {env.current_player} Action: Op={action['operation_id']}:{action_op_name}, Place={action['placement_strategy']}")
+
+#         obs, reward, terminated, truncated, info = env.step(action)
+
+#         print(f"-> Reward: {reward:.4f}, Term: {terminated}, Trunc: {truncated}, Loss: {info.get('last_loss', 'N/A'):.4f}")
+#         if info.get('error'): print(f"-> Info/Error: {info['error']}")
+#         if info.get('termination_reason'): print(f"-> Term Reason: {info['termination_reason']}")
+#         total_reward += reward
+#         env.render()
+#         # if info.get('error'): # Pause on error
+#         #      input("Error encountered. Press Enter to continue...")
+#         # elif step_count % 5 == 0: # Pause every 5 steps
+#         #      input("Paused. Press Enter...")
+
+#     print("\n--- Episode Finished ---")
+#     print(f"Completed in {step_count} agent steps ({env.steps_taken} env steps).")
+#     print(f"Total Reward: {total_reward:.4f}")
+#     final_node_count = len(env.graph.nodes) if env.graph else 0
+#     print(f"Final Nodes: {final_node_count}")
+
+#     # --- Example: Get parameters ---
+#     if env.graph and final_node_count > 0:
+#         final_params = env.graph.get_parameters()
+#         print(f"\nGraph has {len(final_params)} learnable parameter tensors.")
+
+#         # --- Example: Save Structure ---
+#         try:
+#             graph_struct = env.graph.serialize_graph()
+#             print("\nSerialized Graph Structure (JSON):")
+#             # print(json.dumps(graph_struct, indent=2)) # Print if needed
+#             with open("final_graph_structure_expanded.json", "w") as f:
+#                 json.dump(graph_struct, f, indent=2)
+#             print("Saved final graph structure to final_graph_structure_expanded.json")
+#         except Exception as e:
+#             print(f"Error serializing or saving graph: {e}")
+
+#     env.close()
