@@ -1410,22 +1410,68 @@ class MathSelfPlayEnv(gym.Env):
              return x
 
     # --- Linear Algebra ---
+    # This method belongs inside the MathSelfPlayEnv class
+
     def matmul_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
-        # x @ y, y is (F, F)
-        if node.learnable_param is None or node.learnable_param.shape != (self.feature_dim, self.feature_dim):
-            print(f"Error in matmul_core ({node.name}): Invalid learnable_param shape ({node.learnable_param.shape if node.learnable_param is not None else 'None'}).")
-            return x
+        """
+        Performs matrix multiplication x @ y.
+        Adapts if input x has feature dim 1 (e.g., from InnerProd):
+        treats y as a linear layer using its first column to expand features back to F.
+        y is the learnable (F, F) matrix.
+        """
+        op_name = "matmul_core" # For error messages
+        feature_dim = self.feature_dim # F
+
+        # --- Validate Learnable Parameter ---
+        if node.learnable_param is None:
+            print(f"Error in {op_name} ({node.name}): learnable_param is None.")
+            return x # Fallback
         y = node.learnable_param
+        if y.shape != (feature_dim, feature_dim):
+            print(f"Error in {op_name} ({node.name}): Invalid learnable_param shape {y.shape}, expected {(feature_dim, feature_dim)}.")
+            return x # Fallback
 
-        if x.shape[-1] != y.shape[0]:
-            print(f"Error in matmul_core ({node.name}): Shape mismatch. x shape {x.shape}, y shape {y.shape}")
-            return x
+        # --- Validate Input Tensor Shape ---
+        if x.ndim != 3:
+            print(f"Error in {op_name} ({node.name}): Input tensor x is not 3D (shape {x.shape}).")
+            return x # Fallback
+
+        input_feat_dim = x.shape[-1]
+
+        # --- Perform Multiplication ---
         try:
-            return torch.matmul(x, y)
-        except RuntimeError as e:
-             print(f"Error during matmul_core ({node.name}): {e}. Shapes: x={x.shape}, y={y.shape}")
-             return x
+            # --- Case 1: Standard MatMul x @ y ---
+            if input_feat_dim == feature_dim:
+                # Standard case: (B, S, F) @ (F, F) -> (B, S, F)
+                output = torch.matmul(x, y)
 
+            # --- Case 2: Adapted MatMul for Feature Dim 1 Input ---
+            elif input_feat_dim == 1:
+                # Adapt: Treat as linear expansion using first column of y
+                # (B, S, 1) @ (1, F) -> (B, S, F)
+                print(f"Adapting {op_name} ({node.name}): Input feat dim is 1. Using first column of y for expansion.")
+                # Select first column, keep dim: shape (F, 1)
+                y_col = y[:, 0:1]
+                # Transpose to (1, F)
+                y_col_T = y_col.transpose(-1, -2) # or y_col.T if PyTorch version supports it easily
+                output = torch.matmul(x, y_col_T)
+
+            # --- Case 3: Other Input Feature Dimensions (Error) ---
+            else:
+                # Input feature dimension is neither F nor 1
+                print(f"Error in {op_name} ({node.name}): Input feature dim {input_feat_dim} is incompatible with learnable param {y.shape}.")
+                return x # Fallback
+
+            return output
+
+        except RuntimeError as e:
+            # Catch potential matmul errors even if shapes seem okay initially
+            print(f"Error during {op_name} operation ({node.name}): {e}. Shapes: x={x.shape}, y={y.shape}")
+            return x # Fallback
+        except Exception as e:
+            print(f"Unexpected error in {op_name} ({node.name}): {e}")
+            return x # Fallback
+        
     def inner_prod_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
         # sum(x * diag(y), dim=-1, keepdim=True) -> (B, S, 1)
         y_vector = self._get_learnable_param_as_vector(node, "inner_prod")
