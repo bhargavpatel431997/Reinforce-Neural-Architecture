@@ -1,6 +1,6 @@
 [
     {
-        "unique_id": 134637219561872,
+        "unique_id": 134747540567632,
         "op_id": -1,
         "name": "Input_0_P1",
         "position": [
@@ -8,351 +8,444 @@
             0
         ],
         "player_id": 1,
-        "input_ids": []
+        "input_ids": [],
+        "learnable_role": null,
+        "op_info_name": "Input"
     },
     {
-        "unique_id": 134633032408720,
-        "op_id": 22,
-        "name": "Modulo_1_P2",
+        "unique_id": 134747539609104,
+        "op_id": 8,
+        "name": "Mod_1_P1",
         "position": [
             1,
             0
         ],
-        "player_id": 2,
-        "input_ids": [
-            134637219561872,
-            134633031104272,
-            134633034332048,
-            134633030764816,
-            134637219624784
-        ]
-    },
-    {
-        "unique_id": 134633178011920,
-        "op_id": 13,
-        "name": "Set Complement_2_P1",
-        "position": [
-            2,
-            0
-        ],
         "player_id": 1,
         "input_ids": [
-            134633032408720,
-            134637563660752,
-            134637219618384,
-            134637219622032,
-            134637219613008
-        ]
-    },
-    {
-        "unique_id": 134637219538896,
-        "op_id": 17,
-        "name": "Vector Addition_3_P2",
-        "position": [
-            2,
-            1
+            134747540567632,
+            134747539441360,
+            134747541157520
         ],
-        "player_id": 2,
-        "input_ids": [
-            134633032408720,
-            134637563660752,
-            134637219618384,
-            134637219622032,
-            134637219613008
-        ]
+        "learnable_role": "operand_y",
+        "op_info_name": "Mod"
     },
     {
-        "unique_id": 134637563660752,
-        "op_id": 5,
-        "name": "Root Extraction_4_P2",
+        "unique_id": 134747541507536,
+        "op_id": 8,
+        "name": "Mod_2_P2",
         "position": [
             1,
             1
         ],
         "player_id": 2,
         "input_ids": [
-            134637219561872,
-            134633031104272,
-            134633034332048,
-            134633030764816,
-            134637219624784
-        ]
-    },
-    {
-        "unique_id": 134637219618384,
-        "op_id": 17,
-        "name": "Vector Addition_5_P2",
-        "position": [
-            1,
-            2
+            134747540567632,
+            134747539441360,
+            134747541157520
         ],
-        "player_id": 2,
-        "input_ids": [
-            134637219561872,
-            134633031104272,
-            134633034332048,
-            134633030764816,
-            134637219624784
-        ]
+        "learnable_role": "operand_y",
+        "op_info_name": "Mod"
     },
     {
-        "unique_id": 134633030586512,
-        "op_id": 2,
-        "name": "Multiplication_6_P1",
-        "position": [
-            2,
-            2
-        ],
-        "player_id": 1,
-        "input_ids": [
-            134633032408720,
-            134637563660752,
-            134637219618384,
-            134637219622032,
-            134637219613008
-        ]
-    },
-    {
-        "unique_id": 134633030590160,
-        "op_id": 28,
-        "name": "Distance_7_P2",
-        "position": [
-            3,
-            2
-        ],
-        "player_id": 2,
-        "input_ids": [
-            134633178011920,
-            134637219538896,
-            134633030586512,
-            134633032312784,
-            134637209183504
-        ]
-    },
-    {
-        "unique_id": 134633030594576,
-        "op_id": 25,
-        "name": "Supremum_8_P1",
-        "position": [
-            3,
-            3
-        ],
-        "player_id": 1,
-        "input_ids": [
-            134633178011920,
-            134637219538896,
-            134633030586512,
-            134633032312784,
-            134637209183504
-        ]
-    },
-    {
-        "unique_id": 134633031104272,
-        "op_id": 27,
-        "name": "Measure_9_P2",
+        "unique_id": 134747539441360,
+        "op_id": 16,
+        "name": "LayerNorm_3_P1",
         "position": [
             0,
             1
         ],
-        "player_id": 2,
+        "player_id": 1,
         "input_ids": [
-            134637219561872
-        ]
+            134747540567632
+        ],
+        "learnable_role": "bias",
+        "op_info_name": "LayerNorm"
     },
     {
-        "unique_id": 134633034332048,
-        "op_id": 32,
-        "name": "Entropy_10_P2",
+        "unique_id": 134747541157520,
+        "op_id": 7,
+        "name": "InnerProd_4_P1",
         "position": [
             0,
             2
         ],
-        "player_id": 2,
-        "input_ids": [
-            134637219561872
-        ]
-    },
-    {
-        "unique_id": 134633030764816,
-        "op_id": 5,
-        "name": "Root Extraction_11_P1",
-        "position": [
-            0,
-            3
-        ],
         "player_id": 1,
         "input_ids": [
-            134637219561872
-        ]
-    },
-    {
-        "unique_id": 134637219624784,
-        "op_id": 17,
-        "name": "Vector Addition_12_P2",
-        "position": [
-            0,
-            4
+            134747540567632
         ],
-        "player_id": 2,
-        "input_ids": [
-            134637219561872
-        ]
+        "learnable_role": "operand_y",
+        "op_info_name": "InnerProd"
     },
     {
-        "unique_id": 134637219622032,
-        "op_id": 5,
-        "name": "Root Extraction_13_P1",
-        "position": [
-            1,
-            4
-        ],
-        "player_id": 1,
-        "input_ids": [
-            134637219561872,
-            134633031104272,
-            134633034332048,
-            134633030764816,
-            134637219624784
-        ]
-    },
-    {
-        "unique_id": 134637219613008,
-        "op_id": 21,
-        "name": "GCD_14_P2",
-        "position": [
-            1,
-            3
-        ],
-        "player_id": 2,
-        "input_ids": [
-            134637219561872,
-            134633031104272,
-            134633034332048,
-            134633030764816,
-            134637219624784
-        ]
-    },
-    {
-        "unique_id": 134633032312784,
-        "op_id": 13,
-        "name": "Set Complement_15_P1",
-        "position": [
-            2,
-            3
-        ],
-        "player_id": 1,
-        "input_ids": [
-            134633032408720,
-            134637563660752,
-            134637219618384,
-            134637219622032,
-            134637219613008
-        ]
-    },
-    {
-        "unique_id": 134637209183504,
-        "op_id": 29,
-        "name": "Rotation_16_P2",
-        "position": [
-            2,
-            4
-        ],
-        "player_id": 2,
-        "input_ids": [
-            134633032408720,
-            134637563660752,
-            134637219618384,
-            134637219622032,
-            134637219613008
-        ]
-    },
-    {
-        "unique_id": 134633030734160,
-        "op_id": 32,
-        "name": "Entropy_17_P2",
-        "position": [
-            3,
-            4
-        ],
-        "player_id": 2,
-        "input_ids": [
-            134633178011920,
-            134637219538896,
-            134633030586512,
-            134633032312784,
-            134637209183504
-        ]
-    },
-    {
-        "unique_id": 134637219480912,
+        "unique_id": 134747539675984,
         "op_id": 11,
-        "name": "Set Union_18_P2",
+        "name": "Conv1D_5_P2",
         "position": [
-            4,
+            1,
+            2
+        ],
+        "player_id": 2,
+        "input_ids": [
+            134747540567632,
+            134747539441360,
+            134747541157520
+        ],
+        "learnable_role": "operand_y",
+        "op_info_name": "Conv1D"
+    },
+    {
+        "unique_id": 134747539677904,
+        "op_id": 21,
+        "name": "Scale_6_P1",
+        "position": [
+            1,
+            3
+        ],
+        "player_id": 1,
+        "input_ids": [
+            134747540567632,
+            134747539441360,
+            134747541157520
+        ],
+        "learnable_role": "scale",
+        "op_info_name": "Scale"
+    },
+    {
+        "unique_id": 134747540069200,
+        "op_id": 18,
+        "name": "Infimum_7_P2",
+        "position": [
+            1,
             4
         ],
         "player_id": 2,
         "input_ids": [
-            134633030590160,
-            134633030594576,
-            134633030734160
-        ]
+            134747540567632,
+            134747539441360,
+            134747541157520
+        ],
+        "learnable_role": null,
+        "op_info_name": "Infimum"
     },
     {
-        "unique_id": 134633030745424,
-        "op_id": 27,
-        "name": "Measure_19_P1",
+        "unique_id": 134747543185744,
+        "op_id": 21,
+        "name": "Scale_8_P1",
         "position": [
-            5,
+            2,
             4
         ],
         "player_id": 1,
         "input_ids": [
-            134637219480912,
-            134637219623568
-        ]
+            134747539609104,
+            134747541507536,
+            134747539675984,
+            134747539677904,
+            134747540069200
+        ],
+        "learnable_role": "scale",
+        "op_info_name": "Scale"
     },
     {
-        "unique_id": 134637219613328,
+        "unique_id": 134747540077648,
+        "op_id": 7,
+        "name": "InnerProd_9_P2",
+        "position": [
+            2,
+            3
+        ],
+        "player_id": 2,
+        "input_ids": [
+            134747539609104,
+            134747541507536,
+            134747539675984,
+            134747539677904,
+            134747540069200
+        ],
+        "learnable_role": "operand_y",
+        "op_info_name": "InnerProd"
+    },
+    {
+        "unique_id": 134747539288208,
+        "op_id": 20,
+        "name": "Translate_10_P2",
+        "position": [
+            3,
+            3
+        ],
+        "player_id": 2,
+        "input_ids": [
+            134747540077648,
+            134747543185744,
+            134747539390352,
+            134747540132496,
+            134747539378448
+        ],
+        "learnable_role": "bias",
+        "op_info_name": "Translate"
+    },
+    {
+        "unique_id": 134747539288656,
+        "op_id": 4,
+        "name": "Pow_11_P2",
+        "position": [
+            4,
+            3
+        ],
+        "player_id": 2,
+        "input_ids": [
+            134747539288208,
+            134747540128400,
+            134747539452048,
+            134747538959952
+        ],
+        "learnable_role": "operand_y",
+        "op_info_name": "Pow"
+    },
+    {
+        "unique_id": 134747539276816,
+        "op_id": 17,
+        "name": "Supremum_12_P1",
+        "position": [
+            4,
+            2
+        ],
+        "player_id": 1,
+        "input_ids": [
+            134747539288208,
+            134747540128400,
+            134747539452048,
+            134747538959952
+        ],
+        "learnable_role": null,
+        "op_info_name": "Supremum"
+    },
+    {
+        "unique_id": 134747540128400,
+        "op_id": 7,
+        "name": "InnerProd_13_P2",
+        "position": [
+            3,
+            2
+        ],
+        "player_id": 2,
+        "input_ids": [
+            134747540077648,
+            134747543185744,
+            134747539390352,
+            134747540132496,
+            134747539378448
+        ],
+        "learnable_role": "operand_y",
+        "op_info_name": "InnerProd"
+    },
+    {
+        "unique_id": 134747539390352,
+        "op_id": 15,
+        "name": "Log_14_P1",
+        "position": [
+            2,
+            2
+        ],
+        "player_id": 1,
+        "input_ids": [
+            134747539609104,
+            134747541507536,
+            134747539675984,
+            134747539677904,
+            134747540069200
+        ],
+        "learnable_role": null,
+        "op_info_name": "Log"
+    },
+    {
+        "unique_id": 134747540132496,
+        "op_id": 1,
+        "name": "Sub_15_P1",
+        "position": [
+            2,
+            1
+        ],
+        "player_id": 1,
+        "input_ids": [
+            134747539609104,
+            134747541507536,
+            134747539675984,
+            134747539677904,
+            134747540069200
+        ],
+        "learnable_role": "operand_y",
+        "op_info_name": "Sub"
+    },
+    {
+        "unique_id": 134747539378448,
+        "op_id": 11,
+        "name": "Conv1D_16_P1",
+        "position": [
+            2,
+            0
+        ],
+        "player_id": 1,
+        "input_ids": [
+            134747539609104,
+            134747541507536,
+            134747539675984,
+            134747539677904,
+            134747540069200
+        ],
+        "learnable_role": "operand_y",
+        "op_info_name": "Conv1D"
+    },
+    {
+        "unique_id": 134747539452048,
+        "op_id": 17,
+        "name": "Supremum_17_P1",
+        "position": [
+            3,
+            0
+        ],
+        "player_id": 1,
+        "input_ids": [
+            134747539378448,
+            134747540132496,
+            134747539390352,
+            134747540077648,
+            134747543185744
+        ],
+        "learnable_role": null,
+        "op_info_name": "Supremum"
+    },
+    {
+        "unique_id": 134747538959952,
+        "op_id": 10,
+        "name": "IFFT_Plc_18_P2",
+        "position": [
+            3,
+            1
+        ],
+        "player_id": 2,
+        "input_ids": [
+            134747539378448,
+            134747540132496,
+            134747539390352,
+            134747540077648,
+            134747543185744
+        ],
+        "learnable_role": null,
+        "op_info_name": "IFFT_Plc"
+    },
+    {
+        "unique_id": 134747545452432,
+        "op_id": 18,
+        "name": "Infimum_19_P1",
+        "position": [
+            4,
+            1
+        ],
+        "player_id": 1,
+        "input_ids": [
+            134747539452048,
+            134747538959952,
+            134747540128400,
+            134747539288208
+        ],
+        "learnable_role": null,
+        "op_info_name": "Infimum"
+    },
+    {
+        "unique_id": 134747540378960,
+        "op_id": 1,
+        "name": "Sub_20_P1",
+        "position": [
+            4,
+            0
+        ],
+        "player_id": 1,
+        "input_ids": [
+            134747539452048,
+            134747538959952,
+            134747540128400,
+            134747539288208
+        ],
+        "learnable_role": "operand_y",
+        "op_info_name": "Sub"
+    },
+    {
+        "unique_id": 134747540077328,
+        "op_id": 7,
+        "name": "InnerProd_21_P1",
+        "position": [
+            5,
+            0
+        ],
+        "player_id": 1,
+        "input_ids": [
+            134747540378960,
+            134747545452432,
+            134747539276816,
+            134747539288656
+        ],
+        "learnable_role": "operand_y",
+        "op_info_name": "InnerProd"
+    },
+    {
+        "unique_id": 134747538951312,
+        "op_id": 15,
+        "name": "Log_22_P1",
+        "position": [
+            6,
+            0
+        ],
+        "player_id": 1,
+        "input_ids": [
+            134747540077328
+        ],
+        "learnable_role": null,
+        "op_info_name": "Log"
+    },
+    {
+        "unique_id": 134747539384336,
         "op_id": 0,
-        "name": "Addition_20_P2",
+        "name": "Add_23_P2",
         "position": [
-            5,
-            5
+            6,
+            1
         ],
         "player_id": 2,
         "input_ids": [
-            134637219480912,
-            134637219623568
-        ]
+            134747540077328
+        ],
+        "learnable_role": "operand_y",
+        "op_info_name": "Add"
     },
     {
-        "unique_id": 134637219541840,
-        "op_id": 28,
-        "name": "Distance_21_P2",
+        "unique_id": 134747706824080,
+        "op_id": 3,
+        "name": "Div_24_P2",
         "position": [
-            5,
-            6
+            6,
+            2
         ],
         "player_id": 2,
         "input_ids": [
-            134637219480912,
-            134637219623568
-        ]
+            134747540077328
+        ],
+        "learnable_role": "operand_y",
+        "op_info_name": "Div"
     },
     {
-        "unique_id": 134637219623568,
-        "op_id": 22,
-        "name": "Modulo_22_P1",
+        "unique_id": 134747539386064,
+        "op_id": 8,
+        "name": "Mod_25_P1",
         "position": [
-            4,
-            6
+            6,
+            3
         ],
         "player_id": 1,
         "input_ids": [
-            134633030590160,
-            134633030594576,
-            134633030734160
-        ]
+            134747540077328
+        ],
+        "learnable_role": "operand_y",
+        "op_info_name": "Mod"
     }
 ]

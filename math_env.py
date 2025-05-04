@@ -1586,21 +1586,80 @@ class MathSelfPlayEnv(gym.Env):
 
     # --- Normalization ---
     def layernorm_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
-        normalized_shape = x.shape[-1:]
-        try:
-            bias_param = None
-            if node.learnable_role == 'bias' and node.learnable_param is not None:
-                 if node.learnable_param.shape == (self.feature_dim,):
-                      bias_param = node.learnable_param
-                 else: pass # Warning printed elsewhere if role mismatch
-            # Add scale param handling if defined
-            weight_param = None
-            # if node.learnable_role == 'scale' ... weight_param = node.learnable_param ...
+        """
+        Applies Layer Normalization over the last dimension (features).
+        Optionally adds a learnable bias if the input feature dimension matches
+        the environment's feature_dim and the node's role is 'bias'.
+        """
+        op_name = "layernorm_core"
+        feature_dim = self.feature_dim # Original F
 
-            return nn.functional.layer_norm(x, normalized_shape, weight=weight_param, bias=bias_param, eps=1e-5)
+        if x.ndim < 2: # Need at least Batch and Feature dim
+            print(f"Error in {op_name} ({node.name}): Input tensor has too few dimensions ({x.ndim}). Shape: {x.shape}")
+            return x
+
+        # Determine the shape over which normalization occurs (last dimension)
+        current_feat_dim = x.shape[-1]
+        normalized_shape = (current_feat_dim,) # Tuple containing the size of the last dimension
+
+        try:
+            # --- Determine Bias Parameter ---
+            bias_param = None
+            # Check if node is *supposed* to have a bias and has a parameter
+            if node.learnable_role == 'bias' and node.learnable_param is not None:
+                # Check if the parameter's shape matches the *current* input feature dimension
+                if node.learnable_param.shape == normalized_shape:
+                    bias_param = node.learnable_param
+                    # print(f"Debug: Using LN bias param {bias_param.shape} for input {x.shape}")
+                # Check if parameter shape matches original F, but input is different
+                elif node.learnable_param.shape == (feature_dim,) and current_feat_dim != feature_dim:
+                    print(f"Warning: {op_name} ({node.name}) - Input feature dim {current_feat_dim} differs from bias param dim {feature_dim}. Applying LayerNorm *without* bias.")
+                    bias_param = None # Do not use the mismatched bias
+                # Check if parameter shape itself is unexpected
+                elif node.learnable_param.shape != (feature_dim,):
+                    print(f"Warning: {op_name} ({node.name}) - Bias param has unexpected shape {node.learnable_param.shape}. Expected {(feature_dim,)}. Applying LayerNorm *without* bias.")
+                    bias_param = None
+                # Else: Param shape matches original F and input also has F features (bias_param remains None initially, will be set below if needed)
+                # This case is implicitly handled if bias_param is correctly initialized earlier
+
+            # --- Determine Weight (Scale) Parameter (Currently unused but structure is here) ---
+            weight_param = None
+            # if node.learnable_role == 'scale' and node.learnable_param is not None:
+            #     if node.learnable_param.shape == normalized_shape:
+            #          weight_param = node.learnable_param
+            #     else:
+            #          print(f"Warning: {op_name} ({node.name}) - Scale param shape mismatch. Applying LayerNorm *without* scale.")
+
+
+            # --- Apply LayerNorm ---
+            # Provide weight/bias only if they are determined to be compatible
+            output = nn.functional.layer_norm(x,
+                                            normalized_shape=normalized_shape,
+                                            weight=weight_param, # Currently always None
+                                            bias=bias_param,     # None if incompatible
+                                            eps=1e-5)
+            return output
+
         except Exception as e:
-             print(f"Error in layernorm_core ({node.name}): {e}. Shape: {x.shape}")
-             return x
+            print(f"Error during {op_name} operation ({node.name}): {e}. Input Shape: {x.shape}, Normalized Shape: {normalized_shape}")
+            # traceback.print_exc() # Optional for debugging
+            return x # Fallback
+    # def layernorm_core(self, x: torch.Tensor, node: MathNode) -> torch.Tensor:
+    #     normalized_shape = x.shape[-1:]
+    #     try:
+    #         bias_param = None
+    #         if node.learnable_role == 'bias' and node.learnable_param is not None:
+    #              if node.learnable_param.shape == (self.feature_dim,):
+    #                   bias_param = node.learnable_param
+    #              else: pass # Warning printed elsewhere if role mismatch
+    #         # Add scale param handling if defined
+    #         weight_param = None
+    #         # if node.learnable_role == 'scale' ... weight_param = node.learnable_param ...
+
+    #         return nn.functional.layer_norm(x, normalized_shape, weight=weight_param, bias=bias_param, eps=1e-5)
+    #     except Exception as e:
+    #          print(f"Error in layernorm_core ({node.name}): {e}. Shape: {x.shape}")
+    #          return x
 
     # --- Order/Analysis (Reductions) ---
     def _reduction_op(self, x: torch.Tensor, node: MathNode, reduction_func: callable, op_name: str) -> torch.Tensor:
