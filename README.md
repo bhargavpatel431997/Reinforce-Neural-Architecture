@@ -132,10 +132,10 @@ graph TD
     D --> E["Agent's Policy Network Processes State"]
     E --> F["Agent Samples Action (Op ID, Placement)"]
     F --> G[Env Executes Action: Place Node, Connect]
-    G --> H{Valid Move? (DAG, Grid, Connections)}
+    G --> H{Valid Move? DAG, Grid, Connections}
     H -- No --> I[Penalize Agent, Revert Move]
-    H -- Yes --> J[Env Evaluates Current Graph on Seq Batch]
-    J --> K[Env Calculates Loss (MSE) & Reward Signal]
+    H -- Yes --> J["Env Evaluates Current Graph on Seq Batch"]
+    J --> K["Env Calculates Loss (MSE) and Reward Signal"]
     K --> L["Store (State, Action, Reward, Done, LogProb, Value) in Buffer"]
     L --> M{Buffer Full?}
     M -- Yes --> N[Agent Updates Policy via PPO using Buffer Data]
@@ -148,4 +148,4 @@ graph TD
     R -- Yes --> S[Save Best Graph Structure JSON]
     R -- No --> T[Repeat for Next Episode]
     S --> T
-    I --> P # Go back to Agent after invalid move (same player might retry)
+    I --> P
